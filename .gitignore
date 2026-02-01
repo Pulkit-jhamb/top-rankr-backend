@@ -28,6 +28,10 @@ env/
 
 # Environment variables
 .env
+.env.local
+.env.development
+.env.production
+*.env
 
 # IDE
 .vscode/
@@ -35,6 +39,19 @@ env/
 *.swp
 *.swo
 *~
+
+# Sensitive configuration files
+config.py
+secrets.py
+credentials.json
+*.key
+*.pem
+*.cert
+api_keys.json
+database_passwords.txt
+oauth2_credentials.json
+private_keys/
+sensitive_data.csv
 
 # OS
 .DS_Store

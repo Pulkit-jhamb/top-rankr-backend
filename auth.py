@@ -82,6 +82,7 @@ def signup():
     token = jwt.encode({
         'user_id': str(user['_id']),
         'email': user['email'],
+        'name': user.get('name', user['email']),
         'role': role,
         'exp': datetime.utcnow() + timedelta(days=7)
     }, SECRET_KEY, algorithm="HS256")
@@ -133,6 +134,7 @@ def login():
     token = jwt.encode({
         'user_id': str(user['_id']),
         'email': user['email'],
+        'name': user.get('name', user['email']),
         'role': role,
         'exp': datetime.utcnow() + timedelta(days=7)
     }, SECRET_KEY, algorithm="HS256")
