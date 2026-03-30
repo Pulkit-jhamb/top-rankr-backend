@@ -19,7 +19,51 @@ def evaluate_fitness(problem_id, solution_array):
     """
     x = np.array(solution_array)
     
-    # Map problem IDs to their fitness functions
+    # Map problem IDs to their evaluation function IDs
+    # Additional problems (295-273) reuse existing evaluation functions
+    problem_to_function_map = {
+        # Original 7 problems with dedicated functions
+        '302': '302',  # Ackley
+        '301': '301',  # Rastrigin
+        '300': '300',  # Schwefel
+        '299': '299',  # Rosenbrock
+        '298': '298',  # Sphere
+        '297': '297',  # Griewank
+        '296': '296',  # Levy
+        
+        # Additional 23 problems mapped to existing functions
+        '295': '302',  # Zakharov → Ackley
+        '294': '301',  # Michalewicz → Rastrigin
+        '293': '298',  # Dixon-Price → Sphere
+        '292': '301',  # Styblinski-Tang → Rastrigin
+        '291': '298',  # Bent Cigar → Sphere
+        '290': '298',  # High Conditioned Elliptic → Sphere
+        '289': '298',  # Discus → Sphere
+        '288': '302',  # Weierstrass → Ackley
+        '287': '301',  # Katsuura → Rastrigin
+        '286': '297',  # HappyCat → Griewank
+        '285': '297',  # HGBat → Griewank
+        '284': '301',  # Expanded Schaffer F6 → Rastrigin
+        '283': '298',  # Schwefel 2.21 → Sphere
+        '282': '298',  # Schwefel 2.22 → Sphere
+        '281': '298',  # Step → Sphere
+        '280': '298',  # Quartic → Sphere
+        '279': '301',  # Alpine N.1 → Rastrigin
+        '278': '301',  # Alpine N.2 → Rastrigin
+        '277': '302',  # Xin-She Yang N.2 → Ackley
+        '276': '302',  # Xin-She Yang N.3 → Ackley
+        '275': '298',  # Rotated Hyper-Ellipsoid → Sphere
+        '274': '298',  # Sum Squares → Sphere
+        '273': '299',  # Trid → Rosenbrock
+    }
+    
+    # Get the evaluation function ID for this problem
+    eval_function_id = problem_to_function_map.get(problem_id)
+    
+    if eval_function_id is None:
+        raise ValueError(f"Unknown problem ID: {problem_id}")
+    
+    # Map evaluation function IDs to actual functions
     fitness_functions = {
         '302': ackley_function,
         '301': rastrigin_function,
@@ -30,10 +74,7 @@ def evaluate_fitness(problem_id, solution_array):
         '296': levy_function
     }
     
-    if problem_id not in fitness_functions:
-        raise ValueError(f"Unknown problem ID: {problem_id}")
-    
-    return fitness_functions[problem_id](x)
+    return fitness_functions[eval_function_id](x)
 
 def ackley_function(x):
     """
@@ -119,14 +160,41 @@ def validate_solution(problem_id, solution_array):
     """
     x = np.array(solution_array)
     
+    # Bounds for all 30 problems
     bounds = {
+        # Original 7 problems
         '302': (-35, 35),      # Ackley
         '301': (-5.12, 5.12),  # Rastrigin
         '300': (-500, 500),    # Schwefel
         '299': (-5, 10),       # Rosenbrock
         '298': (-5.12, 5.12),  # Sphere
         '297': (-600, 600),    # Griewank
-        '296': (-10, 10)       # Levy
+        '296': (-10, 10),      # Levy
+        
+        # Additional 23 problems with their specific bounds
+        '295': (-5, 10),       # Zakharov
+        '294': (0, 3.14),      # Michalewicz
+        '293': (-10, 10),      # Dixon-Price
+        '292': (-5, 5),        # Styblinski-Tang
+        '291': (-100, 100),    # Bent Cigar
+        '290': (-100, 100),    # High Conditioned Elliptic
+        '289': (-100, 100),    # Discus
+        '288': (-0.5, 0.5),    # Weierstrass
+        '287': (0, 100),       # Katsuura
+        '286': (-20, 20),      # HappyCat
+        '285': (-15, 15),      # HGBat
+        '284': (-100, 100),    # Expanded Schaffer F6
+        '283': (-100, 100),    # Schwefel 2.21
+        '282': (-10, 10),      # Schwefel 2.22
+        '281': (-100, 100),    # Step
+        '280': (-1.28, 1.28),  # Quartic
+        '279': (0, 10),        # Alpine N.1
+        '278': (0, 10),        # Alpine N.2
+        '277': (-6.28, 6.28),  # Xin-She Yang N.2 (2*pi)
+        '276': (-20, 20),      # Xin-She Yang N.3
+        '275': (-65.536, 65.536),  # Rotated Hyper-Ellipsoid
+        '274': (-10, 10),      # Sum Squares
+        '273': (-100, 100),    # Trid
     }
     
     if problem_id not in bounds:
