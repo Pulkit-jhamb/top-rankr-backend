@@ -1,225 +1,274 @@
+"""
+contests.py — TopRanker Contests Blueprint
+
+Key rules enforced here:
+  • Only authenticated students may join or participate.
+  • Contest leaderboard is derived from problem scores (NOT raw f(x)).
+  • Joining requires the event code distributed by the organiser.
+"""
+
+import math
+
 from flask import Blueprint, request, jsonify
-from auth import token_required
-from datetime import datetime
 from bson import ObjectId
 
-contests_bp = Blueprint('contests', __name__)
+from auth import token_required
 
-@contests_bp.route('/', methods=['GET'])
+contests_bp = Blueprint("contests", __name__)
+
+# Contest statuses that allow new registrations
+_OPEN_STATUSES = {"upcoming", "active", "ongoing"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LIST / DETAIL
+# ─────────────────────────────────────────────────────────────────────────────
+
+@contests_bp.route("/", methods=["GET"])
 def get_contests():
-    """Get all contests with pagination and filtering"""
+    """Get all contests with pagination and status / type filtering."""
     from app import db
-    
     if db is None:
-        return jsonify({'message': 'Database connection failed'}), 500
-    
+        return jsonify({"message": "Database connection failed"}), 500
+
     try:
-        page = int(request.args.get('page', 1))
-        limit = int(request.args.get('limit', 10))
-        contest_type = request.args.get('type', 'all')
-        status = request.args.get('status', 'all')
-        
-        skip = (page - 1) * limit
-        
-        # Build filters
+        page         = int(request.args.get("page", 1))
+        limit        = int(request.args.get("limit", 10))
+        contest_type = request.args.get("type", "all")
+        status       = request.args.get("status", "all")
+        skip         = (page - 1) * limit
+
         filters = {}
-        if contest_type != 'all':
-            filters['type'] = contest_type
-        if status != 'all':
-            filters['status'] = status
-        
-        # Get contests with optimized query
-        # Use projection to only fetch needed fields for list view
+        if contest_type != "all":
+            filters["type"] = contest_type
+        if status != "all":
+            filters["status"] = status
+
+        # Do NOT exclude 'participants' from the projection here — we need it
+        # to compute participantCount.  eventCode is excluded for security.
         projection = {
-            'eventId': 1, 'cc': 1, 'name': 1, 'confHomePage': 1, 
-            'organizer': 1, 'type': 1, 'startDate': 1, 'endDate': 1, 
-            'prize': 1, 'status': 1, 'problems': 1
+            "eventId": 1, "cc": 1, "name": 1, "confHomePage": 1,
+            "organizer": 1, "type": 1, "startDate": 1, "endDate": 1,
+            "prize": 1, "status": 1, "problems": 1, "participants": 1,
+            "eventCode": 0,
         }
-        contests = list(db.contests.find(filters, projection).skip(skip).limit(limit).sort("_id", -1))
-        total = db.contests.count_documents(filters)
-        
-        # Convert ObjectId to string
-        for contest in contests:
-            contest['_id'] = str(contest['_id'])
-        
-        return jsonify({
-            'success': True,
-            'data': contests,
-            'pagination': {
-                'page': page,
-                'limit': limit,
-                'total': total,
-                'pages': (total + limit - 1) // limit
-            }
-        }), 200
-    except Exception as e:
-        return jsonify({'message': str(e)}), 500
-
-@contests_bp.route('/<contest_id>', methods=['GET'])
-def get_contest(contest_id):
-    """Get single contest details"""
-    from app import db
-    
-    if db is None:
-        return jsonify({'message': 'Database connection failed'}), 500
-    
-    try:
-        contest = db.contests.find_one({"eventId": contest_id})
-        
-        if not contest:
-            return jsonify({'message': 'Contest not found'}), 404
-        
-        contest['_id'] = str(contest['_id'])
-        
-        # Get problem details for each problem in contest
-        if 'problems' in contest and contest['problems']:
-            problem_details = []
-            for problem_id in contest['problems']:
-                problem = db.problems.find_one({"problemId": problem_id})
-                if problem:
-                    problem['_id'] = str(problem['_id'])
-                    problem_details.append(problem)
-            contest['problemDetails'] = problem_details
-        
-        return jsonify({
-            'success': True,
-            'data': contest
-        }), 200
-    except Exception as e:
-        return jsonify({'message': str(e)}), 500
-
-@contests_bp.route('/<contest_id>/participate', methods=['POST'])
-@token_required
-def participate_in_contest(current_user, contest_id):
-    """Join a contest with event code"""
-    from app import db
-    
-    if db is None:
-        return jsonify({'message': 'Database connection failed'}), 500
-    
-    data = request.get_json()
-    event_code = data.get('eventCode')
-    
-    if not event_code:
-        return jsonify({'message': 'Event code is required'}), 400
-    
-    try:
-        contest = db.contests.find_one({"eventId": contest_id})
-        
-        if not contest:
-            return jsonify({'message': 'Contest not found'}), 404
-        
-        # Verify event code
-        if contest.get('eventCode') != event_code:
-            return jsonify({'message': 'Invalid event code'}), 403
-        
-        # Check if already participated
-        participants = contest.get('participants', [])
-        user_id = current_user['user_id']
-        
-        if user_id in participants:
-            return jsonify({'message': 'Already participating in this contest'}), 400
-        
-        # Add user to participants
-        db.contests.update_one(
-            {"eventId": contest_id},
-            {"$push": {"participants": user_id}}
+        contests = list(
+            db.contests.find(filters, projection)
+                        .skip(skip).limit(limit).sort("_id", -1)
         )
-        
-        return jsonify({
-            'success': True,
-            'message': 'Successfully joined the contest'
-        }), 200
-    except Exception as e:
-        return jsonify({'message': str(e)}), 500
+        total = db.contests.count_documents(filters)
 
-@contests_bp.route('/<contest_id>/leaderboard', methods=['GET'])
-def get_contest_leaderboard(contest_id):
-    """Get contest leaderboard - aggregate scores across all problems"""
-    from app import db
-    
-    if db is None:
-        return jsonify({'message': 'Database connection failed'}), 500
-    
-    try:
-        contest = db.contests.find_one({"eventId": contest_id})
-        
-        if not contest:
-            return jsonify({'message': 'Contest not found'}), 404
-        
-        problem_ids = contest.get('problems', [])
-        participants = contest.get('participants', [])
-        
-        # Calculate scores for each participant
-        leaderboard = []
-        
-        for user_id in participants:
-            user = db.students.find_one({"_id": ObjectId(user_id)})
-            if not user:
-                continue
-            
-            total_score = 0
-            problems_solved = 0
-            problem_rankings = user.get('problem_rankings', {})
-            
-            # Aggregate scores from all contest problems
-            for problem_id in problem_ids:
-                if problem_id in problem_rankings:
-                    ranking = problem_rankings[problem_id]
-                    # Use average of best scores across dimensions
-                    best_scores = ranking.get('best_scores', {})
-                    if best_scores:
-                        avg_score = sum(best_scores.values()) / len(best_scores)
-                        total_score += avg_score
-                        problems_solved += 1
-            
-            leaderboard.append({
-                'userId': str(user['_id']),
-                'userName': user['name'],
-                'email': user['email'],
-                'institution': user.get('institution', ''),
-                'country': user.get('country', ''),
-                'totalScore': total_score,
-                'problemsSolved': problems_solved
-            })
-        
-        # Sort by total score (ascending for minimization)
-        leaderboard.sort(key=lambda x: x['totalScore'])
-        
-        # Add ranks
-        for idx, entry in enumerate(leaderboard, 1):
-            entry['rank'] = idx
-        
-        return jsonify({
-            'success': True,
-            'data': leaderboard
-        }), 200
-    except Exception as e:
-        return jsonify({'message': str(e)}), 500
+        for c in contests:
+            c["_id"] = str(c["_id"])
+            # pop() now correctly finds 'participants' because it is projected
+            c["participantCount"] = len(c.pop("participants", []))
 
-@contests_bp.route('/my-contests', methods=['GET'])
+        return jsonify({
+            "success": True,
+            "data": contests,
+            "pagination": {
+                "page":  page,
+                "limit": limit,
+                "total": total,
+                "pages": math.ceil(total / limit) if total else 0,
+            },
+        }), 200
+    except Exception as exc:
+        return jsonify({"message": str(exc)}), 500
+
+
+# NOTE: /my-contests MUST be registered before /<contest_id> so Flask does not
+# try to resolve the literal string "my-contests" as a contest_id parameter.
+# ─────────────────────────────────────────────────────────────────────────────
+# MY CONTESTS  (authenticated)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@contests_bp.route("/my-contests", methods=["GET"])
 @token_required
 def get_my_contests(current_user):
-    """Get contests user is participating in"""
+    """Return all contests the authenticated user has joined."""
     from app import db
-    
     if db is None:
-        return jsonify({'message': 'Database connection failed'}), 500
-    
+        return jsonify({"message": "Database connection failed"}), 500
+
     try:
-        user_id = current_user['user_id']
-        
-        # Find contests where user is a participant
-        contests = list(db.contests.find({
-            "participants": user_id
-        }).sort("created_at", -1))
-        
-        for contest in contests:
-            contest['_id'] = str(contest['_id'])
-        
+        user_id = current_user["user_id"]
+
+        # Project participants so we can derive participantCount; hide eventCode.
+        contests = list(
+            db.contests.find(
+                {"participants": user_id},
+                {"eventCode": 0},
+            ).sort("created_at", -1)
+        )
+
+        for c in contests:
+            c["_id"] = str(c["_id"])
+            c["participantCount"] = len(c.pop("participants", []))
+
+        return jsonify({"success": True, "data": contests}), 200
+    except Exception as exc:
+        return jsonify({"message": str(exc)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONTEST DETAIL
+# ─────────────────────────────────────────────────────────────────────────────
+
+@contests_bp.route("/<contest_id>", methods=["GET"])
+def get_contest(contest_id):
+    """Fetch a single contest with its problem details."""
+    from app import db
+    if db is None:
+        return jsonify({"message": "Database connection failed"}), 500
+
+    try:
+        contest = db.contests.find_one({"eventId": contest_id})
+        if not contest:
+            return jsonify({"message": "Contest not found"}), 404
+
+        contest["_id"]              = str(contest["_id"])
+        contest["participantCount"] = len(contest.pop("participants", []))
+        contest.pop("eventCode", None)   # never expose the join code
+
+        if contest.get("problems"):
+            problem_details = []
+            for pid in contest["problems"]:
+                p = db.problems.find_one(
+                    {"problemId": pid},
+                    {"fitnessFunction.globalMinimum": 0},  # hide exact f*
+                )
+                if p:
+                    p["_id"] = str(p["_id"])
+                    problem_details.append(p)
+            contest["problemDetails"] = problem_details
+
+        return jsonify({"success": True, "data": contest}), 200
+    except Exception as exc:
+        return jsonify({"message": str(exc)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOIN CONTEST  (authenticated students only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@contests_bp.route("/<contest_id>/participate", methods=["POST"])
+@token_required
+def participate_in_contest(current_user, contest_id):
+    """
+    Join a contest.  Requires the event code.
+    Body: { "eventCode": "XXXX" }
+    """
+    from app import db
+    if db is None:
+        return jsonify({"message": "Database connection failed"}), 500
+
+    if current_user.get("role") != "student":
+        return jsonify({"message": "Only students can join contests"}), 403
+
+    data       = request.get_json() or {}
+    event_code = data.get("eventCode", "").strip()
+
+    if not event_code:
+        return jsonify({"message": "eventCode is required"}), 400
+
+    try:
+        contest = db.contests.find_one({"eventId": contest_id})
+        if not contest:
+            return jsonify({"message": "Contest not found"}), 404
+
+        # Reject if contest is not in an open-for-registration status
+        if contest.get("status") not in _OPEN_STATUSES:
+            return jsonify({"message": "Contest is not open for registration"}), 400
+
+        if contest.get("eventCode") != event_code:
+            return jsonify({"message": "Invalid event code"}), 403
+
+        user_id      = current_user["user_id"]
+        participants = contest.get("participants", [])
+
+        if user_id in participants:
+            return jsonify({"message": "You are already registered for this contest"}), 400
+
+        db.contests.update_one(
+            {"eventId": contest_id},
+            {"$push": {"participants": user_id}},
+        )
+
         return jsonify({
-            'success': True,
-            'data': contests
+            "success": True,
+            "message": f'Successfully joined "{contest.get("name", contest_id)}"',
         }), 200
-    except Exception as e:
-        return jsonify({'message': str(e)}), 500
+    except Exception as exc:
+        return jsonify({"message": str(exc)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONTEST LEADERBOARD
+# Aggregate each participant's best problem scores for all contest problems,
+# sum them → total contest score → rank descending (highest score = rank 1).
+# ─────────────────────────────────────────────────────────────────────────────
+
+@contests_bp.route("/<contest_id>/leaderboard", methods=["GET"])
+def get_contest_leaderboard(contest_id):
+    """
+    Contest leaderboard.
+    Score per problem = max across all contest dimensions of student's best score.
+    Total contest score = sum of per-problem scores.
+    Ranked descending (highest total score = rank 1).
+    """
+    from app import db
+    if db is None:
+        return jsonify({"message": "Database connection failed"}), 500
+
+    try:
+        contest = db.contests.find_one({"eventId": contest_id})
+        if not contest:
+            return jsonify({"message": "Contest not found"}), 404
+
+        problem_ids  = contest.get("problems", [])
+        participants = contest.get("participants", [])
+
+        leaderboard = []
+
+        for user_id in participants:
+            try:
+                student = db.students.find_one({"_id": ObjectId(user_id)})
+            except Exception:
+                continue
+            if not student:
+                continue
+
+            problem_rankings = student.get("problem_rankings", {})
+            total_score      = 0.0
+            problems_scored  = 0
+
+            for pid in problem_ids:
+                dim_scores = problem_rankings.get(pid, {}).get("best_scores", {})
+                if dim_scores:
+                    best         = max(dim_scores.values())
+                    total_score += best
+                    problems_scored += 1
+
+            leaderboard.append({
+                "userId":         str(student["_id"]),
+                "name":           student.get("name", "Anonymous"),
+                "email":          student.get("email", ""),
+                "country":        student.get("country", "N/A"),
+                "institution":    student.get("institution", "N/A"),
+                "totalScore":     round(total_score, 4),
+                "problemsScored": problems_scored,
+                "totalProblems":  len(problem_ids),
+                # participantCount on the leaderboard itself is just the total
+                # number of registered participants, useful for UI display
+                "participantCount": len(participants),
+            })
+
+        leaderboard.sort(key=lambda e: e["totalScore"], reverse=True)
+
+        for idx, entry in enumerate(leaderboard, start=1):
+            entry["rank"] = idx
+
+        return jsonify({"success": True, "data": leaderboard}), 200
+    except Exception as exc:
+        return jsonify({"message": str(exc)}), 500

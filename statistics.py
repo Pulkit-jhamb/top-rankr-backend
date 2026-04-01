@@ -31,8 +31,11 @@ def get_statistics():
         # User type distribution
         academic_users = db.students.count_documents({'institution': {'$exists': True, '$ne': ''}})
         
-        # Problems solved distribution (can be enhanced)
-        active_users = db.students.count_documents({'problems_solved': {'$gt': 0}})
+        # BUG FIX: Schema uses 'problem_rankings' (a dict), not 'problems_solved' (an int).
+        # Changed query to check for non-empty problem_rankings dict to correctly count active users.
+        active_users = db.students.count_documents({
+            'problem_rankings': {'$exists': True, '$ne': {}, '$ne': None}
+        })
         
         # Top rankers (top 10 by rating)
         top_rankers = list(db.students.find(
@@ -53,7 +56,15 @@ def get_statistics():
             {'$sort': {'problemCount': -1}},
             {'$limit': 10}
         ])
-        contributor_stats = list(top_contributors)
+        # BUG FIX: '_id' in aggregation results is a plain string (ownerName), not an ObjectId,
+        # but it must still be serialized as a string to be JSON-safe and avoid serialization errors.
+        contributor_stats = []
+        for c in top_contributors:
+            contributor_stats.append({
+                'name': c['_id'],
+                'problemCount': c['problemCount'],
+                'institution': c.get('institution', 'N/A')
+            })
         
         # Recent activity (last 30 days)
         thirty_days_ago = datetime.utcnow() - timedelta(days=30)

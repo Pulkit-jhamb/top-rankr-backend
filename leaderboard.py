@@ -1,26 +1,10 @@
 from flask import Blueprint, jsonify, request
 from bson import ObjectId
-from functools import wraps
-import jwt
+# BUG FIX: Removed duplicate token_required decorator - import from auth.py instead
+from auth import token_required
 import os
 
 leaderboard_bp = Blueprint('leaderboard', __name__)
-
-def token_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = request.headers.get('Authorization')
-        if not token:
-            return jsonify({'message': 'Token is missing'}), 401
-        try:
-            if token.startswith('Bearer '):
-                token = token.split(' ')[1]
-            data = jwt.decode(token, os.getenv('JWT_SECRET_KEY', 'your-secret-key'), algorithms=['HS256'])
-            current_user = data
-        except:
-            return jsonify({'message': 'Token is invalid'}), 401
-        return f(current_user, *args, **kwargs)
-    return decorated
 
 @leaderboard_bp.route('/users', methods=['GET'])
 def get_user_leaderboard():
@@ -48,6 +32,9 @@ def get_user_leaderboard():
         for idx, user in enumerate(users, start=skip + 1):
             # Get user's submission stats
             total_submissions = db.submissions.count_documents({'userId': str(user['_id'])})
+            # BUG FIX: Count distinct problems attempted (used as problemsSolved proxy)
+            # Previously labelled as 'problemsSolved' but was counting distinct attempted problems.
+            # Now correctly named 'problemsAttempted' to match actual semantics.
             problems_attempted = len(db.submissions.distinct('problemId', {'userId': str(user['_id'])}))
             
             leaderboard.append({
@@ -57,7 +44,9 @@ def get_user_leaderboard():
                 'country': user.get('country', 'N/A'),
                 'institution': user.get('institution', 'N/A'),
                 'rating': user.get('rating', 0),
-                'problemsSolved': problems_attempted,
+                # BUG FIX: Renamed from 'problemsSolved' to 'problemsAttempted' to reflect
+                # that this counts distinct problems with any submission, not just solved ones.
+                'problemsAttempted': problems_attempted,
                 'totalSubmissions': total_submissions
             })
         
