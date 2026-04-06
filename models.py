@@ -88,12 +88,13 @@ class Admin:
 
         now = _now_utc()
         doc = {
-            'name':       data['name'],
-            'email':      data['email'].lower().strip(),
-            'password':   data['password'],
-            'role':       'admin',
-            'created_at': now,
-            'updated_at': now,
+            'name':        data['name'],
+            'email':       data['email'].lower().strip(),
+            'password':    data['password'],
+            'role':        'admin',
+            'permissions': data.get('permissions', []),
+            'created_at':  now,
+            'updated_at':  now,
         }
         result = db[Admin.COLLECTION].insert_one(doc)
         doc['_id'] = result.inserted_id

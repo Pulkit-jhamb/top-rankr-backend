@@ -76,7 +76,7 @@ def get_country_leaderboard():
         pipeline = [
             {
                 '$match': {
-                    'country': {'$exists': True, '$ne': None, '$ne': ''}
+                    'country': {'$exists': True, '$nin': [None, '']}
                 }
             },
             {
@@ -135,7 +135,7 @@ def get_institution_leaderboard():
         pipeline = [
             {
                 '$match': {
-                    'institution': {'$exists': True, '$ne': None, '$ne': ''}
+                    'institution': {'$exists': True, '$nin': [None, '']}
                 }
             },
             {
@@ -196,7 +196,7 @@ def get_problem_setter_leaderboard():
         pipeline = [
             {
                 '$match': {
-                    'ownerName': {'$exists': True, '$ne': None, '$ne': ''}
+                    'ownerName': {'$exists': True, '$nin': [None, '']}
                 }
             },
             {

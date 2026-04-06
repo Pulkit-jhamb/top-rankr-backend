@@ -4,15 +4,19 @@ contests.py — TopRanker Contests Blueprint
 Key rules enforced here:
   • Only authenticated students may join or participate.
   • Contest leaderboard is derived from problem scores (NOT raw f(x)).
-  • Joining requires the event code distributed by the organiser.
+  • Joining is open — no event code required.
 """
 
 import math
+import os
 
+import jwt
 from flask import Blueprint, request, jsonify
 from bson import ObjectId
 
 from auth import token_required
+
+_SECRET_KEY = os.environ.get("SECRET_KEY", "your-secret-key-change-in-production")
 
 contests_bp = Blueprint("contests", __name__)
 
@@ -50,7 +54,6 @@ def get_contests():
             "eventId": 1, "cc": 1, "name": 1, "confHomePage": 1,
             "organizer": 1, "type": 1, "startDate": 1, "endDate": 1,
             "prize": 1, "status": 1, "problems": 1, "participants": 1,
-            "eventCode": 0,
         }
         contests = list(
             db.contests.find(filters, projection)
@@ -77,8 +80,8 @@ def get_contests():
         return jsonify({"message": str(exc)}), 500
 
 
-# NOTE: /my-contests MUST be registered before /<contest_id> so Flask does not
-# try to resolve the literal string "my-contests" as a contest_id parameter.
+# NOTE: /my-contests and /my-problems MUST be registered before /<contest_id>
+# so Flask does not try to resolve these literal strings as a contest_id.
 # ─────────────────────────────────────────────────────────────────────────────
 # MY CONTESTS  (authenticated)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,6 +115,66 @@ def get_my_contests(current_user):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MY PROBLEMS  (authenticated) — all problems from contests the user joined
+# ─────────────────────────────────────────────────────────────────────────────
+
+@contests_bp.route("/my-problems", methods=["GET"])
+@token_required
+def get_my_problems(current_user):
+    """
+    Return all problems (with full details) from every contest the
+    authenticated user has joined, grouped by contest.
+    """
+    from app import db
+    if db is None:
+        return jsonify({"message": "Database connection failed"}), 500
+
+    try:
+        user_id = current_user["user_id"]
+
+        contests = list(db.contests.find(
+            {"participants": user_id},
+            {"eventCode": 0},
+        ).sort("created_at", -1))
+
+        groups = []
+        seen_problem_ids = set()
+
+        for c in contests:
+            c["_id"] = str(c["_id"])
+            c["participantCount"] = len(c.pop("participants", []))
+            problem_ids = c.get("problems", [])
+
+            problem_details = []
+            for pid in problem_ids:
+                p = db.problems.find_one(
+                    {"problemId": pid},
+                    {"fitnessFunction.globalMinimum": 0},
+                )
+                if p:
+                    p["_id"] = str(p["_id"])
+                    problem_details.append(p)
+                    seen_problem_ids.add(pid)
+
+            groups.append({
+                "contestId":    c.get("eventId"),
+                "contestName":  c.get("name"),
+                "status":       c.get("status"),
+                "problems":     problem_details,
+            })
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "groups":       groups,
+                "totalProblems": len(seen_problem_ids),
+            },
+        }), 200
+    except Exception as exc:
+        return jsonify({"message": str(exc)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CONTEST DETAIL
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -127,7 +190,22 @@ def get_contest(contest_id):
         if not contest:
             return jsonify({"message": "Contest not found"}), 404
 
-        contest["_id"]              = str(contest["_id"])
+        contest["_id"] = str(contest["_id"])
+
+        # Optionally resolve whether the requesting user is a participant
+        is_participant = False
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            try:
+                token_str = auth_header.split(" ", 1)[1]
+                decoded = jwt.decode(token_str, _SECRET_KEY, algorithms=["HS256"])
+                uid = decoded.get("user_id")
+                if uid:
+                    is_participant = uid in contest.get("participants", [])
+            except Exception:
+                pass
+
+        contest["isParticipant"]    = is_participant
         contest["participantCount"] = len(contest.pop("participants", []))
         contest.pop("eventCode", None)   # never expose the join code
 
@@ -156,8 +234,7 @@ def get_contest(contest_id):
 @token_required
 def participate_in_contest(current_user, contest_id):
     """
-    Join a contest.  Requires the event code.
-    Body: { "eventCode": "XXXX" }
+    Join a contest.  No event code required — authentication is sufficient.
     """
     from app import db
     if db is None:
@@ -166,23 +243,13 @@ def participate_in_contest(current_user, contest_id):
     if current_user.get("role") != "student":
         return jsonify({"message": "Only students can join contests"}), 403
 
-    data       = request.get_json() or {}
-    event_code = data.get("eventCode", "").strip()
-
-    if not event_code:
-        return jsonify({"message": "eventCode is required"}), 400
-
     try:
         contest = db.contests.find_one({"eventId": contest_id})
         if not contest:
             return jsonify({"message": "Contest not found"}), 404
 
-        # Reject if contest is not in an open-for-registration status
         if contest.get("status") not in _OPEN_STATUSES:
             return jsonify({"message": "Contest is not open for registration"}), 400
-
-        if contest.get("eventCode") != event_code:
-            return jsonify({"message": "Invalid event code"}), 403
 
         user_id      = current_user["user_id"]
         participants = contest.get("participants", [])

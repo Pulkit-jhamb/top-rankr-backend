@@ -1,5 +1,8 @@
+import logging
 from flask import Blueprint, jsonify
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+logger = logging.getLogger(__name__)
 
 statistics_bp = Blueprint('statistics', __name__)
 
@@ -29,12 +32,12 @@ def get_statistics():
         india_users = db.students.count_documents({'country': 'India'})
         
         # User type distribution
-        academic_users = db.students.count_documents({'institution': {'$exists': True, '$ne': ''}})
+        academic_users = db.students.count_documents({'institution': {'$exists': True, '$nin': [None, '']}})
         
         # BUG FIX: Schema uses 'problem_rankings' (a dict), not 'problems_solved' (an int).
         # Changed query to check for non-empty problem_rankings dict to correctly count active users.
         active_users = db.students.count_documents({
-            'problem_rankings': {'$exists': True, '$ne': {}, '$ne': None}
+            'problem_rankings': {'$exists': True, '$nin': [{}, None]}
         })
         
         # Top rankers (top 10 by rating)
@@ -67,7 +70,7 @@ def get_statistics():
             })
         
         # Recent activity (last 30 days)
-        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+        thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
         recent_submissions = db.submissions.count_documents({
             'submittedAt': {'$gte': thirty_days_ago}
         })
@@ -95,6 +98,7 @@ def get_statistics():
             }
         }), 200
     except Exception as e:
+        logger.exception('Error in get_statistics')
         return jsonify({'message': str(e)}), 500
 
 @statistics_bp.route('/user/<user_id>', methods=['GET'])
@@ -116,11 +120,13 @@ def get_user_statistics(user_id):
         total_submissions = db.submissions.count_documents({'userId': user_id})
         
         # Get problems attempted and solved
-        problem_rankings = user.get('problem_rankings', {})
+        problem_rankings = user.get('problem_rankings') or {}
+        if not isinstance(problem_rankings, dict):
+            problem_rankings = {}
         problems_attempted = len(problem_rankings)
         
         # Calculate activity heatmap (last 365 days)
-        one_year_ago = datetime.utcnow() - timedelta(days=365)
+        one_year_ago = datetime.now(timezone.utc) - timedelta(days=365)
         submissions_by_date = db.submissions.aggregate([
             {
                 '$match': {
@@ -129,11 +135,23 @@ def get_user_statistics(user_id):
                 }
             },
             {
+                '$addFields': {
+                    'submittedDate': {
+                        '$cond': {
+                            'if': {'$eq': [{'$type': '$submittedAt'}, 'date']},
+                            'then': '$submittedAt',
+                            'else': {'$toDate': '$submittedAt'}
+                        }
+                    }
+                }
+            },
+            {
                 '$group': {
                     '_id': {
                         '$dateToString': {
                             'format': '%Y-%m-%d',
-                            'date': '$submittedAt'
+                            'date': '$submittedDate',
+                            'onNull': None
                         }
                     },
                     'count': {'$sum': 1}
@@ -141,7 +159,11 @@ def get_user_statistics(user_id):
             }
         ])
         
-        activity_data = {item['_id']: item['count'] for item in submissions_by_date}
+        activity_data = {
+            item['_id']: item['count']
+            for item in submissions_by_date
+            if item['_id'] is not None
+        }
         
         # Get rank distribution across problems
         rank_distribution = []
@@ -156,6 +178,7 @@ def get_user_statistics(user_id):
                 })
         
         user['_id'] = str(user['_id'])
+        user.pop('password', None)
         
         return jsonify({
             'success': True,
@@ -168,4 +191,5 @@ def get_user_statistics(user_id):
             }
         }), 200
     except Exception as e:
+        logger.exception('Error in get_user_statistics for user_id=%s', user_id)
         return jsonify({'message': str(e)}), 500

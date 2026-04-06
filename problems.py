@@ -9,11 +9,13 @@ Handles:
   - Updating per-problem, per-contest, and global leaderboards
 """
 
+import inspect
 import math
 from datetime import datetime, timezone, timedelta
 
+import numpy as np
 from bson import ObjectId
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response
 
 from auth import token_required
 
@@ -83,10 +85,6 @@ def evaluate_TR006(x, D):
 
 def evaluate_TR007(x, D):
     """Vortex Core — ill-conditioned rotated ellipsoid + sinusoidal overlay."""
-    # FIX: numpy is now imported at module level (not inside the function),
-    # and the rotation matrix is built deterministically without re-seeding
-    # on every call by caching it keyed on dimension.
-    import numpy as np
     R = _get_rotation_matrix(D)
     y = R @ np.array(x, dtype=float)
     ell = float(y[0] ** 2 + 1e5 * sum(float(yi) ** 2 for yi in y[1:]))
@@ -101,7 +99,6 @@ _rotation_cache: dict = {}
 
 def _get_rotation_matrix(D: int):
     """Return (and cache) the deterministic D×D rotation matrix for TR-007."""
-    import numpy as np
     if D not in _rotation_cache:
         rng = np.random.default_rng(42)
         A = rng.standard_normal((D, D))
@@ -433,6 +430,60 @@ def get_problem(problem_id):
         return jsonify({'success': True, 'data': problem}), 200
     except Exception as exc:
         return jsonify({'message': str(exc)}), 500
+
+
+@problems_bp.route('/<problem_id>/fitness-code', methods=['GET'])
+def get_fitness_code(problem_id):
+    """Return a downloadable Python file implementing the fitness function."""
+    evaluator = EVALUATORS.get(problem_id)
+    if evaluator is None:
+        return jsonify({'message': f'No Python evaluator available for {problem_id}'}), 404
+
+    _NEEDS_SAFE_EXP = {"TR-002", "TR-004", "TR-007", "TR-010"}
+
+    parts = [
+        f'"""',
+        f'TopRanker Fitness Function: {problem_id}',
+        f'',
+        f'Use this file to evaluate your solution vector locally.',
+        f'Call the function with x (list of floats, length == D) and D (int).',
+        f'Lower f(x) yields a higher score on the platform.',
+        f'"""',
+        'import math',
+    ]
+
+    if problem_id == 'TR-007':
+        parts.append('import numpy as np')
+
+    parts.append('')
+
+    if problem_id in _NEEDS_SAFE_EXP:
+        parts.append(inspect.getsource(_safe_exp).rstrip())
+        parts.append('')
+
+    if problem_id == 'TR-007':
+        parts.append('_rotation_cache = {}')
+        parts.append('')
+        parts.append(inspect.getsource(_get_rotation_matrix).rstrip())
+        parts.append('')
+
+    parts.append(inspect.getsource(evaluator).rstrip())
+    parts.append('')
+    parts.append('')
+    parts.append('# ── Example usage ──────────────────────────────────────────')
+    parts.append(f'# D = 20')
+    parts.append(f'# x = [0.0] * D')
+    parts.append(f'# result = {evaluator.__name__}(x, D)')
+    parts.append(f'# print(f"f(x) = {{result}}")')
+
+    code = '\n'.join(parts)
+    filename = f'fitness_{problem_id.replace("-", "_").lower()}.py'
+
+    return Response(
+        code,
+        mimetype='text/x-python',
+        headers={'Content-Disposition': f'attachment; filename={filename}'},
+    )
 
 
 @problems_bp.route('/<problem_id>/submit', methods=['POST'])

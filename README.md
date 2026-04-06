@@ -1,14 +1,643 @@
-# TopRanker Backend - Updated System Analysis
+# TopRanker Backend - Comprehensive Code Analysis
 
-## Overview
+## Project Overview
 
-TopRanker is a sophisticated competitive optimization platform where users solve mathematical optimization problems by submitting solution vectors. The system evaluates submissions against complex fitness functions, maintains rankings, and hosts contests. This Flask backend integrates with MongoDB Atlas for data persistence.
+TopRanker is a competitive optimization platform where users solve mathematical optimization problems by submitting solution vectors. The system evaluates submissions against complex fitness functions, maintains rankings, and hosts contests.
 
-**Status: SIGNIFICANTLY IMPROVED** - Major security and functionality issues have been addressed based on previous analysis.
+**Architecture:** Flask + MongoDB Atlas with modular blueprint structure
+
+---
+
+## File-by-File Analysis
+
+### 1. `requirements.txt` - Dependencies
+
+**Purpose:** Lists all Python dependencies with versions
+
+**Contents:**
+
+- Flask==3.0.0 - Web framework
+- flask-cors==4.0.0 - CORS handling
+- pymongo==4.6.1 - MongoDB driver
+- python-dotenv==1.0.0 - Environment variables
+- PyJWT==2.8.0 - JWT token handling
+- numpy>=1.26.0 - Numerical computations
+- werkzeug>=3.0.0 - WSGI utilities and password hashing
+
+**Issues:** None critical. All versions appear compatible.
+
+---
+
+### 2. `app.py` - Application Entry Point
+
+**Purpose:**
+
+- Flask application initialization
+- MongoDB Atlas connection with TLS
+- Blueprint registration
+- Structured logging configuration
+- Global error handlers
+
+**Implementation Details:**
+
+- Uses `load_dotenv()` for environment configuration
+- Configures structured logging with timestamp, level, name, message
+- Establishes MongoDB connection with 5s timeout, TLS with certifi CA file
+- Registers 5 blueprints: auth, problems, contests, statistics, leaderboard
+- Provides `/health` endpoint for monitoring
+
+**Key Code Patterns:**
+
+```python
+client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000, tls=True, tlsCAFile=certifi.where())
+client.admin.command("ping")  # Force connection check
+```
+
+**Issues Identified:**
+
+| Severity   | Issue                         | Description                                                                                     |
+| ---------- | ----------------------------- | ----------------------------------------------------------------------------------------------- |
+| **HIGH**   | Hardcoded fallback SECRET_KEY | Line 30: `"your-secret-key-change-in-production"` - if env var missing, uses predictable secret |
+| **MEDIUM** | No rate limiting middleware   | Flask app has no global rate limiting; relies on individual routes                              |
+| **MEDIUM** | No security headers           | Missing Content-Security-Policy, X-Content-Type-Options, X-Frame-Options, etc.                  |
+| **LOW**    | No graceful shutdown          | SIGTERM/SIGINT handling not implemented                                                         |
+| **LOW**    | No request ID logging         | Hard to trace requests across logs                                                              |
+
+**Logical Issues:**
+
+- SECRET_KEY is read twice: once in app.py (line 24-30) and again in auth.py (line 14). This violates DRY and could cause mismatches.
+
+---
+
+### 3. `auth.py` - Authentication System
+
+**Purpose:**
+
+- JWT-based authentication
+- User registration with validation
+- Login with anti-enumeration protection
+- Token verification middleware
+
+**Implementation Details:**
+
+- Uses PyJWT with HS256 algorithm
+- Password hashing via Werkzeug's `generate_password_hash`
+- Tokens expire after 7 days (configurable)
+- Email normalization to lowercase
+- Password policy: 8+ characters, 1+ digit
+
+**Key Functions:**
+
+- `signup()`: Creates users with email validation and password strength checks
+- `login()`: Secure authentication with generic "Invalid credentials" message
+- `verify_token()`: Token validation endpoint
+- `token_required`: Decorator for protected routes
+
+**Issues Identified:**
+
+| Severity   | Issue                           | Line | Description                                                                      |
+| ---------- | ------------------------------- | ---- | -------------------------------------------------------------------------------- |
+| **HIGH**   | Duplicate SECRET_KEY definition | 14   | Reads env var independently from app.py - could mismatch                         |
+| **HIGH**   | Token extraction vulnerability  | 72   | `auth_header.split(" ")[1]` will crash if header is just "Bearer " with no token |
+| **MEDIUM** | No account lockout              | -    | No protection against brute force attacks                                        |
+| **MEDIUM** | No password reset               | -    | Forgot password functionality missing                                            |
+| **MEDIUM** | No email verification           | -    | Users can register with any email                                                |
+| **LOW**    | No refresh tokens               | 33   | 7-day fixed expiration; no way to refresh without re-login                       |
+| **LOW**    | Weak email regex                | 19   | `^[^@\s]+@[^@\s]+\.[^@\s]+$` allows invalid emails like "a@b.c"                  |
+
+**Logical Bug (Token Extraction):**
+
+```python
+# Line 72 - BUG: Will raise IndexError if header is "Bearer " with no token
+token = auth_header.split(" ")[1] if auth_header.startswith("Bearer ") else auth_header
+
+# Should be:
+if auth_header.startswith("Bearer "):
+    parts = auth_header.split(" ")
+    if len(parts) != 2:
+        return jsonify({"message": "Invalid token format"}), 401
+    token = parts[1]
+else:
+    token = auth_header
+```
+
+---
+
+### 4. `models.py` - Data Models
+
+**Purpose:**
+
+- Static CRUD helper classes for Student and Admin collections
+- Timezone-aware timestamp management
+- Field validation
+
+**Implementation Details:**
+
+- `Student` class: create(), find_by_email(), find_by_id(), update_timestamp()
+- `Admin` class: create(), find_by_email(), find_by_id()
+- Uses `_now_utc()` helper for Python 3.12+ compatibility
+- Validates required fields before insertion
+
+**Student Schema:**
+
+```python
+{
+    'name': str,
+    'email': str (lowercase),
+    'password': str (hashed),
+    'role': 'student',
+    'country': str (default: ''),
+    'institution': str (default: ''),
+    'rating': float (default: 0.0),
+    'problems_solved': int (default: 0),
+    'problem_rankings': dict (default: {}),
+    'created_at': datetime (timezone-aware),
+    'updated_at': datetime (timezone-aware)
+}
+```
+
+**Issues Identified:**
+
+| Severity   | Issue                            | Description                                                        |
+| ---------- | -------------------------------- | ------------------------------------------------------------------ |
+| **MEDIUM** | No unique constraint enforcement | No database-level unique index on email; race conditions possible  |
+| **MEDIUM** | No schema migration              | If data model changes, no migration utilities exist                |
+| **LOW**    | No soft delete                   | Deleted users are permanently gone; no recovery                    |
+| **LOW**    | Incomplete Admin model           | Admins lack permissions field initialization seen in README schema |
+
+**Logical Issue:**
+
+- `problems_solved` field is initialized but the system actually tracks `problem_rankings` dict. These can get out of sync.
+
+---
+
+### 5. `problems.py` - Problem Engine (LARGEST FILE - 675 lines)
+
+**Purpose:**
+
+- 10 custom fitness function evaluators (TR-001 to TR-010)
+- Solution submission handling with rate limiting
+- Input validation and domain bounds checking
+- Scoring: `score = 1000 / (1 + |f(x) - f*|)`
+- Leaderboard updates
+
+**Fitness Functions:**
+
+1. **TR-001**: Cascading Tide - circular sine coupling
+2. **TR-002**: Phantom Plateau - sigmoid minus Gaussian
+3. **TR-003**: Spiral Sink - polar ridges on consecutive pairs
+4. **TR-004**: Mirage Basin - three false attractors
+5. **TR-005**: Recursive Ripple - four-scale fractal surface
+6. **TR-006**: Tidal Lock - constrained optimization with penalties
+7. **TR-007**: Vortex Core - rotated ellipsoid + sinusoidal overlay (uses numpy)
+8. **TR-008**: Hollow Crown - hyper-ring optimum with symmetry breaker
+9. **TR-009**: Phase Shift Labyrinth - frequency/phase scaling
+10. **TR-010**: Abyss Gate - adversarial deceptive function
+
+**Rate Limiting:**
+
+- Max 5 submissions per UTC day per problem+dimension
+- 5-minute cooldown between submissions
+- Enforced via MongoDB queries on submissions collection
+
+**Routes:**
+
+- `GET /` - List problems with pagination
+- `GET /<problem_id>` - Get problem details
+- `POST /<problem_id>/submit` - Submit solution (protected)
+- `GET /<problem_id>/my-submissions` - User's submission history (protected)
+- `GET /<problem_id>/leaderboard` - Problem leaderboard
+
+**Issues Identified:**
+
+| Severity   | Issue                           | Line    | Description                                                                |
+| ---------- | ------------------------------- | ------- | -------------------------------------------------------------------------- |
+| **HIGH**   | Race condition in rate limiting | 230-267 | Check and insert are separate operations; concurrent requests could bypass |
+| **MEDIUM** | No transaction support          | 544-561 | Leaderboard update happens after submission insert; could be inconsistent  |
+| **MEDIUM** | Inefficient rank calculation    | 305-336 | Full re-sort of all participants on every submission (O(n log n))          |
+| **MEDIUM** | Hidden global minima hardcoded  | 150-181 | Values embedded in code; changing them requires redeploy                   |
+| **LOW**    | TR-007 uses fixed seed          | 102     | Rotation matrix always uses seed 42; predictable "randomness"              |
+| **LOW**    | No evaluation timeout           | 527     | Fitness functions could hang on malicious input                            |
+| **LOW**    | Double database update          | 549-557 | Two separate `update_one` calls for counting; not atomic                   |
+
+**Logical Issues:**
+
+1. **Rating calculation inconsistency**: `_update_platform_rating()` calculates average of all best scores, but this is called after every submission even if score didn't improve (line 302-306). Redundant work.
+
+2. **Dimension rank recalculation is inefficient**: Every submission triggers `_recalculate_dimension_ranks()` which fetches ALL participants and re-sorts them (lines 305-336). For large contests (10k+ users), this is O(n log n) per submission.
+
+3. **Rate limiting uses naive UTC day**: `get_today_utc()` resets at midnight UTC, which may be midday for some users. No per-user timezone support.
+
+---
+
+### 6. `contests.py` - Contest Management
+
+**Purpose:**
+
+- Contest listing and detail retrieval
+- User participation with event code validation
+- Contest-specific leaderboards
+- Problem assignment to contests
+
+**Implementation Details:**
+
+- Routes ordered carefully: `/my-contests` before `/<contest_id>` to avoid Flask route conflict
+- Event codes stored in plain text (security concern)
+- Contest leaderboard aggregates user's best scores across contest problems
+
+**Routes:**
+
+- `GET /` - List contests with pagination
+- `GET /my-contests` - User's contests (protected)
+- `GET /<contest_id>` - Contest details
+- `POST /<contest_id>/participate` - Join contest with event code (protected)
+- `GET /<contest_id>/leaderboard` - Contest leaderboard
+
+**Issues Identified:**
+
+| Severity   | Issue                           | Line    | Description                                                                 |
+| ---------- | ------------------------------- | ------- | --------------------------------------------------------------------------- |
+| **HIGH**   | Event codes in plain text       | 184-185 | No hashing/encryption of event codes                                        |
+| **MEDIUM** | Missing contest creation        | -       | No admin endpoints to create/edit contests                                  |
+| **MEDIUM** | No contest time validation      | 181     | Only checks status field; doesn't validate actual dates                     |
+| **MEDIUM** | Inefficient leaderboard query   | 234-240 | N+1 query pattern: one query per participant                                |
+| **LOW**    | String comparison for ObjectIds | 190     | `user_id in participants` compares strings; participants stored as strings? |
+
+**Logical Issues:**
+
+1. **Contest status not auto-updated**: The system relies on a `status` field but doesn't have a cron job or trigger to update it based on `startDate`/`endDate`.
+
+2. **Participant lookup by string**: The code compares `user_id` (from JWT, string) with `participants` array. This assumes participants are stored as strings, but other parts of the code use ObjectId. Inconsistent schema.
+
+---
+
+### 7. `leaderboard.py` - Multi-level Rankings
+
+**Purpose:**
+
+- Global user leaderboard by rating
+- Country leaderboard (aggregated by country)
+- Institution leaderboard (aggregated by institution)
+- Problem setter leaderboard (contributors)
+
+**Implementation Details:**
+
+- Uses MongoDB aggregation pipelines for grouping
+- Pagination support on user leaderboard
+- Total submissions counted via separate queries
+
+**Routes:**
+
+- `GET /users` - Global user rankings
+- `GET /countries` - Country rankings
+- `GET /institutions` - Institution rankings
+- `GET /problem-setters` - Contributor rankings
+
+**Issues Identified (FIXED in recent edit):**
+
+| Severity | Issue                | Status    | Description                                                                                     |
+| -------- | -------------------- | --------- | ----------------------------------------------------------------------------------------------- |
+| **HIGH** | Duplicate `$ne` keys | **FIXED** | Lines 78, 136, 197 had `{'$ne': None, '$ne': ''}` which silently fails (Python dict overwrites) |
+
+**Remaining Issues:**
+
+| Severity   | Issue                           | Description                                                                       |
+| ---------- | ------------------------------- | --------------------------------------------------------------------------------- |
+| **MEDIUM** | Inefficient submission counting | Lines 34, 104-106, 164-166: N+1 queries to count submissions per user/institution |
+| **MEDIUM** | No caching                      | Leaderboards recalculated on every request; expensive aggregations                |
+| **LOW**    | Hardcoded limits                | 100 items max for countries/institutions/setters                                  |
+| **LOW**    | Division by zero risk           | Lines 60, 113, 174: No check for `avgRating` being None before rounding           |
+
+**Logical Issues:**
+
+1. **Country submission count is inefficient**: For each country, it fetches all user IDs, converts to strings, then queries submissions. This is O(n) queries per country.
+
+2. **Inconsistent field naming**: `problemsAttempted` vs `problemsSolved` - the code uses attempted (any submission) but the schema has a `problems_solved` field that's not used.
+
+---
+
+### 8. `ranking_system.py` - Ranking Calculations
+
+**Purpose:**
+
+- Calculate per-problem, per-dimension rankings
+- Compute overall problem rank (average of dimension ranks)
+- Incremental ranking updates
+- Full recalculation utility
+
+**Key Functions:**
+
+- `calculate_problem_rankings()`: Computes rankings for a problem+dimension
+- `calculate_overall_problem_rank()`: Cross-dimensional average rank
+- `update_user_rankings()`: Incremental update after submission
+- `recalculate_all_rankings()`: Full system recalculation
+- `get_user_problem_rankings()`: Get enriched rankings for a user
+
+**Implementation Details:**
+
+- Rankings stored in nested dict: `problem_rankings.{problem_id}.{field}.{dimension}`
+- Higher score = better rank (rank 1 = highest score)
+- Uses timezone-aware datetimes
+
+**Issues Identified:**
+
+| Severity   | Issue                             | Line    | Description                                                                                                                                   |
+| ---------- | --------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| **MEDIUM** | O(n²) complexity in recalculation | 145-176 | For each problem, fetches all submissions; for each user, recalculates overall rank (which fetches all users again)                           |
+| **MEDIUM** | Inconsistent data structure       | 162-164 | Stores `problem_rankings.{pid}` as `ranking_data` which has `dimension_ranks`, `best_scores`, then overwrites with `.overall_rank` separately |
+| **LOW**    | No ranking consistency validation | -       | No checks that ranks are sequential (1,2,3...) without gaps                                                                                   |
+| **LOW**    | Unused function                   | 179-210 | `get_user_problem_rankings()` is defined but not called anywhere                                                                              |
+
+**Logical Issues:**
+
+1. **Race condition in incremental updates**: `update_user_rankings()` calls `calculate_problem_rankings()` which queries all submissions, then updates the user. If another submission happens during this, the ranking could be wrong.
+
+2. **Double calculation**: `calculate_overall_problem_rank()` is called during `recalculate_all_rankings()` for each user, but this function itself queries all users again. Very inefficient.
+
+---
+
+### 9. `statistics.py` - Analytics and Metrics
+
+**Purpose:**
+
+- Platform-wide statistics aggregation
+- User-specific analytics with activity heatmaps
+- Country and institution distributions
+- Recent activity tracking
+
+**Routes:**
+
+- `GET /` - Platform statistics
+- `GET /user/<user_id>` - Individual user statistics
+
+**Metrics Provided:**
+
+- Total submissions, users, problems
+- Country distribution
+- Top rankers (by rating)
+- Top contributors (problem setters)
+- Recent activity (30 days)
+- User activity heatmap (365 days)
+
+**Issues Identified (FIXED in recent edit):**
+
+| Severity | Issue                          | Status    | Description                                                                        |
+| -------- | ------------------------------ | --------- | ---------------------------------------------------------------------------------- |
+| **HIGH** | Duplicate `$ne` keys           | **FIXED** | Line 36 had `{'$ne': {}, '$ne': None}` which fails                                 |
+| **HIGH** | Deprecated `datetime.utcnow()` | **FIXED** | Lines 70, 123 used deprecated naive datetime; now use `datetime.now(timezone.utc)` |
+| **HIGH** | Missing `timezone` import      | **FIXED** | Was imported `datetime, timedelta` only; needed `timezone` too                     |
+
+**Remaining Issues:**
+
+| Severity   | Issue                 | Line  | Description                                                       |
+| ---------- | --------------------- | ----- | ----------------------------------------------------------------- |
+| **MEDIUM** | Hardcoded country     | 29    | `india_users` specifically counted; why special case?             |
+| **MEDIUM** | No caching            | -     | Statistics are expensive aggregations; recalculated every request |
+| **LOW**    | Academic users logic  | 32    | Checks `$exists: True, $ne: ''` but not `$ne: None`               |
+| **LOW**    | Unbounded aggregation | 21-24 | Country aggregation returns all countries; could be huge          |
+
+**Logical Issues:**
+
+1. **Active users query may be wrong**: The query checks for non-empty `problem_rankings`, but a user could have rankings with 0 scores or incomplete data.
+
+2. **Activity heatmap uses UTC dates**: `$dateToString` uses UTC by default; users in other timezones will see shifted activity.
+
+---
+
+## Cross-File Issues and Architecture Problems
+
+### 1. **Circular Import Risk**
+
+- `app.py` imports all blueprints
+- Each blueprint imports `from app import db` inside functions (runtime import)
+- This pattern works but is fragile; better to use app factory pattern
+
+### 2. **Inconsistent Schema Assumptions**
+
+| Field                | Expected | Actual Inconsistency                                           |
+| -------------------- | -------- | -------------------------------------------------------------- |
+| `user_id` in JWT     | String   | Sometimes compared to ObjectId strings, sometimes to ObjectIds |
+| `participants` array | ?        | Sometimes treated as string array, sometimes ObjectId array    |
+| `problems_solved`    | Counter  | Calculated from `problem_rankings` dict length; can desync     |
+
+### 3. **No Database Indexes**
+
+Critical missing indexes (will cause full collection scans):
+
+- `students.email` (unique)
+- `students.country`
+- `students.institution`
+- `submissions.userId`
+- `submissions.problemId`
+- `submissions.submittedAt`
+- `problems.problemId` (unique)
+- `contests.eventId` (unique)
+
+### 4. **Error Handling Inconsistencies**
+
+- Some places return `{'message': str(e)}`, others include `exc` or `e`
+- Some include `success: False`, others don't include `success` key
+- HTTP status codes: some use 400 for validation, others 409 for conflicts
+
+### 5. **Security Headers Missing**
+
+No Flask-Talisman or manual security headers for:
+
+- Content-Security-Policy
+- X-Content-Type-Options
+- X-Frame-Options
+- Strict-Transport-Security
+- X-XSS-Protection
+
+### 6. **No Input Sanitization**
+
+- User-provided strings (names, institutions) stored directly in database
+- Potential for NoSQL injection via MongoDB operators in unsanitized inputs
+
+---
+
+## Summary of Critical Issues
+
+### Must Fix Before Production:
+
+1. **Rate limiting race condition** (`problems.py`) - Concurrent submissions can bypass limits
+2. **Token extraction crash** (`auth.py:72`) - IndexError on malformed Authorization header
+3. **Missing database indexes** - Performance will degrade severely with scale
+4. **Event codes in plain text** (`contests.py`) - Security vulnerability
+5. **No input sanitization** - NoSQL injection risk
+
+### Should Fix Soon:
+
+6. **Inefficient leaderboard calculations** - O(n log n) per submission won't scale
+7. **N+1 query patterns** - In country/institution leaderboards
+8. **No caching layer** - Redis would dramatically improve performance
+9. **No security headers** - XSS/clickjacking protection missing
+10. **Circular import pattern** - Fragile, should use proper app factory
+
+### Nice to Have:
+
+11. Contest status auto-updates (cron job)
+12. Password reset functionality
+13. Email verification
+14. Soft deletes for users
+15. Request ID logging for tracing
+
+---
+
+## Database Schema Summary
+
+### Collections:
+
+1. **students** - User accounts, ratings, problem rankings
+2. **admins** - Administrator accounts
+3. **problems** - Optimization problems, metadata, counters
+4. **submissions** - Solution submissions with scores
+5. **contests** - Contest definitions, participants, problems
+
+### Key Relationships:
+
+```
+students ←──submissions──→ problems
+    ↑                        ↓
+    └── problem_rankings ←───┘
+
+contests ──participants──→ students (string user IDs)
+contests ──problems──────→ problems (problemId strings)
+```
+
+---
+
+## Testing Recommendations
+
+1. **Unit tests** for each fitness function (known inputs/outputs)
+2. **Integration tests** for submission flow
+3. **Load tests** for leaderboard endpoints
+4. **Security tests** for rate limiting, authentication
+5. **Race condition tests** for concurrent submissions
+
+---
+
+## API Endpoints Summary
+
+### Authentication (`/api/auth`)
+
+- `POST /signup` - User registration
+- `POST /login` - User login
+- `GET /verify` - Token verification
+
+### Problems (`/api/problems`)
+
+- `GET /` - List problems with pagination
+- `GET /<problem_id>` - Get problem details
+- `POST /<problem_id>/submit` - Submit solution
+- `GET /<problem_id>/my-submissions` - User's submission history
+- `GET /<problem_id>/leaderboard` - Problem-specific leaderboard
+
+### Contests (`/api/contests`)
+
+- `GET /` - List contests
+- `GET /<contest_id>` - Contest details
+- `POST /<contest_id>/participate` - Join contest
+- `GET /<contest_id>/leaderboard` - Contest leaderboard
+- `GET /my-contests` - User's contests
+
+### Leaderboard (`/api/leaderboard`)
+
+- `GET /users` - Global user rankings
+- `GET /countries` - Country rankings
+- `GET /institutions` - Institution rankings
+- `GET /problem-setters` - Contributor rankings
+
+### Statistics (`/api/statistics`)
+
+- `GET /` - Platform statistics
+- `GET /user/<user_id>` - User statistics
+
+### Health Check
+
+- `GET /health` - System health status
+
+---
+
+## Setup Instructions
+
+### 1. Prerequisites
+
+- Python 3.8+
+- MongoDB Atlas account
+- (Optional) Redis for caching
+
+### 2. Installation
+
+```bash
+cd top-rankr-backend
+pip install -r requirements.txt
+```
+
+### 3. Environment Configuration
+
+Create `.env` file:
+
+```env
+# Database Configuration
+MONGO_URI=mongodb+srv://your-credentials
+
+# Security Configuration
+SECRET_KEY=your-secret-key-here (generate a strong random key)
+FLASK_DEBUG=false
+
+# Optional: JWT Configuration (uses SECRET_KEY if not set)
+JWT_SECRET_KEY=your-jwt-secret
+```
+
+**Security Notes:**
+
+- Generate a strong SECRET_KEY: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+- Never commit `.env` file to version control
+- Use different credentials for production
+
+### 4. Database Setup
+
+```bash
+# Seed problems (run once)
+python seed_problems.py
+
+# Seed sample users and contests
+python seed_all_data.py
+```
+
+### 5. Running the Application
+
+```bash
+python app.py
+```
+
+The server will start on `http://localhost:3999`
+
+### 6. Health Check
+
+```bash
+curl http://localhost:3999/health
+```
+
+Expected Response:
+
+```json
+{
+  "status": "ok",
+  "mongodb": "connected"
+}
+```
+
+---
+
+**Last Updated:** April 2026
+**Status:** Development/Staging Ready (70% Production Ready)
 
 ## Architecture Overview
 
 The system follows a modular blueprint architecture with the following core components:
+
 - **Authentication System**: JWT-based auth with enhanced security
 - **Problem Engine**: Complex fitness function evaluation with caching
 - **Contest Management**: Event-based competitions with proper validation
@@ -21,6 +650,7 @@ The system follows a modular blueprint architecture with the following core comp
 ### 1. `app.py` - Main Application Entry Point ✅ **IMPROVED**
 
 **Functionality:**
+
 - Flask application initialization with CORS support
 - MongoDB Atlas connection with proper error handling
 - Blueprint registration with error recovery
@@ -29,6 +659,7 @@ The system follows a modular blueprint architecture with the following core comp
 - Production-ready configuration management
 
 **Current Implementation:**
+
 ```python
 - Structured logging with proper formatting
 - SECRET_KEY validation with warnings for production
@@ -39,6 +670,7 @@ The system follows a modular blueprint architecture with the following core comp
 ```
 
 **✅ Fixes Applied:**
+
 - Added comprehensive logging system
 - Implemented SECRET_KEY validation and warnings
 - Added MongoDB connection ping verification
@@ -47,12 +679,14 @@ The system follows a modular blueprint architecture with the following core comp
 - Added blueprint registration error handling
 
 **Remaining Issues:**
+
 - No graceful shutdown handling
 - Missing request logging middleware
 - No application-level rate limiting
 - Missing monitoring/metrics collection
 
 **Missing Components:**
+
 - Application configuration management
 - Request logging middleware
 - Rate limiting at application level
@@ -62,6 +696,7 @@ The system follows a modular blueprint architecture with the following core comp
 ### 2. `auth.py` - Authentication & Authorization System ✅ **SIGNIFICANTLY IMPROVED**
 
 **Functionality:**
+
 - Enhanced JWT-based authentication for students and admins
 - Secure user registration with validation
 - Improved login with anti-enumeration protection
@@ -70,6 +705,7 @@ The system follows a modular blueprint architecture with the following core comp
 - Email format validation
 
 **Current Implementation:**
+
 ```python
 - signup(): Creates users with email validation and password strength checks
 - login(): Secure authentication with generic error messages
@@ -81,6 +717,7 @@ The system follows a modular blueprint architecture with the following core comp
 ```
 
 **✅ Fixes Applied:**
+
 - Added email format validation with regex
 - Implemented password strength requirements (8+ chars, 1 digit)
 - Added timezone-aware datetime handling (Python 3.12+ compatible)
@@ -90,12 +727,14 @@ The system follows a modular blueprint architecture with the following core comp
 - Fixed duplicate decorator issue (imported properly)
 
 **Security Improvements:**
+
 - Password policy enforcement
 - Email validation prevents malformed inputs
 - Generic login messages prevent user enumeration
 - Timezone-aware token expiration
 
 **Remaining Issues:**
+
 - No password reset functionality
 - Missing email verification system
 - No account lockout after failed attempts
@@ -103,6 +742,7 @@ The system follows a modular blueprint architecture with the following core comp
 - No two-factor authentication
 
 **Missing Components:**
+
 - Password reset functionality
 - Email verification system
 - Account activation/deactivation
@@ -113,6 +753,7 @@ The system follows a modular blueprint architecture with the following core comp
 ### 3. `models.py` - Data Models and CRUD Operations ✅ **IMPROVED**
 
 **Functionality:**
+
 - Enhanced Student and Admin data models with validation
 - Comprehensive CRUD helper methods
 - Proper field validation and error handling
@@ -120,6 +761,7 @@ The system follows a modular blueprint architecture with the following core comp
 - Data consistency enforcement
 
 **Current Implementation:**
+
 ```python
 - Student class: create() with validation, find_by_email(), find_by_id(), update_timestamp()
 - Admin class: create() with validation, find_by_email(), find_by_id()
@@ -130,6 +772,7 @@ The system follows a modular blueprint architecture with the following core comp
 ```
 
 **✅ Fixes Applied:**
+
 - Added required fields validation with descriptive error messages
 - Implemented timezone-aware datetime (Python 3.12+ compatible)
 - Fixed inconsistent field naming (problems_solved vs problem_rankings)
@@ -139,18 +782,21 @@ The system follows a modular blueprint architecture with the following core comp
 - Added input validation for email searches
 
 **Data Model Improvements:**
+
 - Students now have proper rating, problems_solved, problem_rankings initialization
 - Consistent timestamp handling across all models
 - Better error handling for invalid ObjectId conversions
 - Field validation prevents incomplete data insertion
 
 **Remaining Issues:**
+
 - No unique constraint enforcement at database level
 - Missing relationship management between collections
 - No soft delete functionality
 - Limited data migration utilities
 
 **Missing Components:**
+
 - Model relationships and foreign keys
 - Data migration utilities
 - Model serialization/deserialization
@@ -161,6 +807,7 @@ The system follows a modular blueprint architecture with the following core comp
 ### 4. `problems.py` - Problem Engine & Submission System ✅ **SIGNIFICANTLY IMPROVED**
 
 **Functionality:**
+
 - Enhanced complex fitness function evaluation (10 original optimization problems)
 - Improved submission handling with robust rate limiting
 - Advanced input validation and sanitization
@@ -169,6 +816,7 @@ The system follows a modular blueprint architecture with the following core comp
 - Multi-dimensional problem support (20, 50, 100 dimensions)
 
 **Current Implementation:**
+
 ```python
 - 10 custom fitness functions (TR-001 to TR-010) with optimizations
 - Rate limiting: 5 submissions/day, 1 per 5 minutes with atomic checks
@@ -180,6 +828,7 @@ The system follows a modular blueprint architecture with the following core comp
 ```
 
 **✅ Fixes Applied:**
+
 - Fixed numpy import issue in TR-007 with module-level import and caching
 - Added comprehensive input validation (finite numbers, bounds checking)
 - Implemented rotation matrix caching for TR-007 performance
@@ -190,17 +839,20 @@ The system follows a modular blueprint architecture with the following core comp
 - Improved error handling for evaluation failures
 
 **Performance Improvements:**
+
 - Cached rotation matrices for TR-007 (significant speed improvement)
 - Separated MongoDB update operations to prevent conflicts
 - Optimized rate limiting queries with helper functions
 - Better error handling prevents unnecessary database operations
 
 **Security Improvements:**
+
 - Input validation prevents NaN/Inf submissions
 - Bounds checking ensures domain constraints
 - Finite number validation prevents evaluation errors
 
 **Remaining Issues:**
+
 - No submission queue system for async evaluation
 - Missing evaluation timeout handling
 - No benchmark comparison features
@@ -208,6 +860,7 @@ The system follows a modular blueprint architecture with the following core comp
 - No evaluation cost tracking
 
 **Missing Components:**
+
 - Submission queue system for async evaluation
 - Evaluation timeout handling
 - Benchmark comparison features
@@ -218,6 +871,7 @@ The system follows a modular blueprint architecture with the following core comp
 ### 5. `contests.py` - Contest Management System ✅ **IMPROVED**
 
 **Functionality:**
+
 - Enhanced contest listing and management
 - Secure user participation with event code validation
 - Improved contest-specific leaderboards
@@ -225,6 +879,7 @@ The system follows a modular blueprint architecture with the following core comp
 - Proper route ordering to prevent conflicts
 
 **Current Implementation:**
+
 ```python
 - get_contests(): Paginated contest listing with filters and proper projection
 - get_my_contests(): User's participated contests (moved before <contest_id> route)
@@ -234,24 +889,28 @@ The system follows a modular blueprint architecture with the following core comp
 ```
 
 **✅ Fixes Applied:**
+
 - Fixed route ordering issue (my-contests before <contest_id>)
-- Added proper contest status validation (_OPEN_STATUSES constant)
+- Added proper contest status validation (\_OPEN_STATUSES constant)
 - Improved projection handling for participant counts
 - Enhanced error handling and exception management
 - Better contest leaderboard with participant count information
 - Added proper event code security (never exposed in responses)
 
 **Routing Improvements:**
+
 - Fixed Flask route conflict by ordering my-contests before dynamic routes
 - Better URL structure and parameter handling
 - Consistent error responses across all endpoints
 
 **Security Improvements:**
+
 - Event codes properly excluded from API responses
 - Contest status validation prevents unauthorized participation
 - Better input validation and sanitization
 
 **Remaining Issues:**
+
 - No contest creation endpoint (admin functionality missing)
 - Event codes stored in plain text (should be encrypted)
 - Missing contest duration enforcement
@@ -259,6 +918,7 @@ The system follows a modular blueprint architecture with the following core comp
 - No contest prize distribution system
 
 **Missing Components:**
+
 - Admin contest creation and management
 - Contest scheduling and automation
 - Prize distribution system
@@ -270,6 +930,7 @@ The system follows a modular blueprint architecture with the following core comp
 ### 6. `leaderboard.py` - Multi-level Ranking System ✅ **IMPROVED**
 
 **Functionality:**
+
 - Enhanced global user rankings by rating
 - Improved country and institution leaderboards
 - Better problem-setter contributor rankings
@@ -277,6 +938,7 @@ The system follows a modular blueprint architecture with the following core comp
 - Fixed semantic issues with problem counting
 
 **Current Implementation:**
+
 ```python
 - get_user_leaderboard(): Global user rankings with proper problem counting
 - get_country_leaderboard(): Country-wise rankings with submission stats
@@ -286,6 +948,7 @@ The system follows a modular blueprint architecture with the following core comp
 ```
 
 **✅ Fixes Applied:**
+
 - **CRITICAL**: Fixed duplicate token_required decorator (imported from auth.py)
 - Fixed semantic issue: renamed 'problemsSolved' to 'problemsAttempted' for accuracy
 - Improved problem counting logic (distinct problems attempted, not solved)
@@ -293,22 +956,26 @@ The system follows a modular blueprint architecture with the following core comp
 - Better error handling and consistent response formats
 
 **Semantic Improvements:**
+
 - 'problemsAttempted' now accurately reflects distinct problems with submissions
 - Better distinction between attempted vs solved problems
 - More accurate leaderboard statistics
 
 **Code Quality Improvements:**
+
 - Removed duplicate authentication code
 - Better import organization
 - Consistent error handling across endpoints
 
 **Remaining Issues:**
+
 - No caching for expensive aggregation queries
 - Missing ranking history/trends
 - No ranking refresh scheduling
 - Limited ranking calculation methods
 
 **Missing Components:**
+
 - Ranking history and trends
 - Real-time ranking updates
 - Ranking categories/specializations
@@ -319,6 +986,7 @@ The system follows a modular blueprint architecture with the following core comp
 ### 7. `ranking_system.py` - Advanced Ranking Calculations ✅ **CRITICAL FIXES APPLIED**
 
 **Functionality:**
+
 - Enhanced complex ranking algorithm implementation
 - Improved multi-dimensional ranking calculations
 - Better overall problem rank computation
@@ -326,6 +994,7 @@ The system follows a modular blueprint architecture with the following core comp
 - Timezone-aware timestamp handling
 
 **Current Implementation:**
+
 ```python
 - calculate_problem_rankings(): Dimension-specific rankings with better logic
 - calculate_overall_problem_rank(): Cross-dimensional averaging
@@ -335,6 +1004,7 @@ The system follows a modular blueprint architecture with the following core comp
 ```
 
 **✅ Critical Fixes Applied:**
+
 - **CRITICAL**: Fixed missing datetime import (was causing NameError)
 - Added timezone-aware datetime handling throughout
 - Improved ranking calculation logic and performance
@@ -343,24 +1013,28 @@ The system follows a modular blueprint architecture with the following core comp
 - More efficient data structures and algorithms
 
 **Algorithm Improvements:**
+
 - Better ranking calculation for multi-dimensional problems
 - Improved participant count tracking
 - More accurate overall problem rankings
 - Enhanced data validation and error handling
 
 **Code Quality Improvements:**
+
 - Consistent timezone handling
 - Better function documentation
 - Improved error messages and debugging
 - More efficient database queries
 
 **Remaining Issues:**
+
 - No ranking consistency validation
 - Missing ranking conflict resolution
 - No ranking performance metrics
 - Inefficient full recalculation for large datasets
 
 **Missing Components:**
+
 - Ranking validation and consistency checks
 - Performance optimization for large datasets
 - Ranking backup and restore
@@ -371,6 +1045,7 @@ The system follows a modular blueprint architecture with the following core comp
 ### 8. `statistics.py` - Analytics and Metrics ✅ **BUG FIXES APPLIED**
 
 **Functionality:**
+
 - Enhanced platform-wide statistics aggregation
 - Improved user-specific analytics
 - Better activity tracking and reporting
@@ -378,6 +1053,7 @@ The system follows a modular blueprint architecture with the following core comp
 - Optimized aggregation queries
 
 **Current Implementation:**
+
 ```python
 - get_statistics(): Platform overview metrics with proper active user counting
 - get_user_statistics(): Individual user analytics with activity heatmaps
@@ -387,6 +1063,7 @@ The system follows a modular blueprint architecture with the following core comp
 ```
 
 **✅ Fixes Applied:**
+
 - **CRITICAL**: Fixed active user counting (was checking wrong field)
 - Fixed contributor statistics serialization (ObjectId handling)
 - Improved aggregation query performance
@@ -394,16 +1071,19 @@ The system follows a modular blueprint architecture with the following core comp
 - Enhanced data validation and consistency
 
 **Data Schema Fixes:**
+
 - Fixed active user counting to use 'problem_rankings' instead of 'problems_solved'
 - Proper handling of aggregation pipeline results
 - Better serialization of MongoDB ObjectId to string
 
 **Query Improvements:**
+
 - More efficient aggregation pipelines
 - Better field projections for performance
 - Improved error handling for edge cases
 
 **Remaining Issues:**
+
 - No caching for expensive aggregation queries
 - Missing time-based analytics (growth trends)
 - No statistical significance testing
@@ -411,6 +1091,7 @@ The system follows a modular blueprint architecture with the following core comp
 - Missing real-time statistics
 
 **Missing Components:**
+
 - Time-series analytics
 - Growth trend analysis
 - Performance benchmarking
@@ -422,6 +1103,7 @@ The system follows a modular blueprint architecture with the following core comp
 ### 9. `seed_all_data.py` - Database Seeding Script ✅ **SIGNIFICANTLY IMPROVED**
 
 **Functionality:**
+
 - Enhanced database setup with comprehensive sample data
 - Secure user and admin account creation
 - Improved contest initialization with proper data structure
@@ -429,6 +1111,7 @@ The system follows a modular blueprint architecture with the following core comp
 - Environment-based configuration
 
 **Current Implementation:**
+
 ```python
 - Creates 3 sample students with complete field structure
 - Creates 2 sample admins with proper timestamps
@@ -439,6 +1122,7 @@ The system follows a modular blueprint architecture with the following core comp
 ```
 
 **✅ Fixes Applied:**
+
 - **CRITICAL**: Added environment-based MongoDB URI configuration
 - **CRITICAL**: Added missing required fields for students (rating, problem_rankings, etc.)
 - Enhanced error handling with try/catch blocks for all operations
@@ -447,27 +1131,32 @@ The system follows a modular blueprint architecture with the following core comp
 - Better error messages and graceful failure handling
 
 **Security Improvements:**
+
 - Environment variable support for database credentials
 - No hardcoded sensitive information in error messages
 - Proper connection verification before operations
 
 **Data Structure Improvements:**
+
 - Students now have all required fields for leaderboard/statistics functionality
 - Proper timestamp handling (created_at, updated_at)
 - Consistent data structure across all collections
 
 **Error Handling Improvements:**
+
 - Try/catch blocks around all database operations
 - Graceful failure with proper cleanup
 - Better error messages for debugging
 
 **Remaining Issues:**
+
 - Still uses hardcoded fallback credentials
 - Limited data validation
 - No backup and restore functionality
 - Basic migration system
 
 **Missing Components:**
+
 - Comprehensive data validation and integrity checks
 - Backup and restore functionality
 - Advanced migration system
@@ -477,6 +1166,7 @@ The system follows a modular blueprint architecture with the following core comp
 ### 10. `seed_problems.py` - Problem Database Seeding ⚠️ **NEEDS IMPROVEMENT**
 
 **Functionality:**
+
 - Seeds 10 original optimization problems
 - Complex fitness function definitions
 - Problem metadata and descriptions
@@ -484,6 +1174,7 @@ The system follows a modular blueprint architecture with the following core comp
 - Hidden global minima for fair competition
 
 **Current Implementation:**
+
 ```python
 - 10 sophisticated optimization problems (TR-001 to TR-010)
 - Detailed problem descriptions and strategic hints
@@ -493,6 +1184,7 @@ The system follows a modular blueprint architecture with the following core comp
 ```
 
 **Issues Identified:**
+
 - **CRITICAL**: Still has hardcoded database credentials (security risk)
 - Extremely long file (588 lines) - should be modularized
 - No problem validation before insertion
@@ -501,6 +1193,7 @@ The system follows a modular blueprint architecture with the following core comp
 - No problem testing framework
 
 **Problem Design Quality:**
+
 - Excellent variety of optimization problem types
 - Well-designed fitness functions with different characteristics
 - Proper difficulty progression (Easy to Hard)
@@ -508,12 +1201,14 @@ The system follows a modular blueprint architecture with the following core comp
 - Hidden global minima ensure fair competition
 
 **Technical Issues:**
+
 - No environment variable support for database configuration
 - Large monolithic file structure
 - No validation of problem data integrity
 - Missing error handling for insertion failures
 
 **Missing Components:**
+
 - **CRITICAL**: Environment-based configuration
 - Problem validation system
 - Version control for problems
@@ -523,6 +1218,7 @@ The system follows a modular blueprint architecture with the following core comp
 - Problem update/edition management
 
 **Recommendations:**
+
 1. **Immediate**: Add environment variable support for MongoDB URI
 2. **Short-term**: Split into modular files by problem category
 3. **Medium-term**: Add problem validation and testing framework
@@ -531,12 +1227,14 @@ The system follows a modular blueprint architecture with the following core comp
 ## System Integration Issues - ✅ **MANY RESOLVED**
 
 ### ✅ Fixed Cross-File Dependencies
+
 1. **✅ RESOLVED**: Authentication inconsistency - duplicate `token_required` decorator removed
 2. **⚠️ PARTIAL**: Database connection imports still exist but are properly handled
 3. **✅ IMPROVED**: Ranking calculation consistency improved across files
 4. **⚠️ REMAINS**: No centralized configuration management
 
 ### ✅ Improved System Components
+
 1. **✅ RESOLVED**: Logging system now implemented in app.py
 2. **✅ IMPROVED**: Error handling standardized across most endpoints
 3. **✅ RESOLVED**: Rate limiting properly implemented in problems.py
@@ -547,6 +1245,7 @@ The system follows a modular blueprint architecture with the following core comp
 8. **⚠️ REMAINS**: Missing security headers
 
 ### ✅ Fixed Data Model Inconsistencies
+
 1. **✅ RESOLVED**: Student schema now consistent with proper field initialization
 2. **✅ IMPROVED**: Contest schema better structured
 3. **⚠️ REMAINS**: Submission schema lacks audit trail
@@ -555,6 +1254,7 @@ The system follows a modular blueprint architecture with the following core comp
 ## Security Vulnerabilities - ✅ **SIGNIFICANTLY IMPROVED**
 
 ### ✅ Resolved Critical Issues
+
 1. **✅ IMPROVED**: SECRET_KEY validation and warnings implemented
 2. **✅ RESOLVED**: Environment-based configuration for most credentials
 3. **✅ RESOLVED**: Debug mode now environment-controlled (default OFF)
@@ -562,6 +1262,7 @@ The system follows a modular blueprint architecture with the following core comp
 5. **⚠️ REMAINS**: Event codes still stored in plain text
 
 ### ✅ Implemented Security Improvements
+
 1. **✅ RESOLVED**: Environment-based configuration management
 2. **✅ RESOLVED**: Input validation and sanitization
 3. **✅ RESOLVED**: Rate limiting for critical operations
@@ -570,6 +1271,7 @@ The system follows a modular blueprint architecture with the following core comp
 6. **⚠️ REMAINS**: No regular security testing framework
 
 ### ⚠️ Remaining Security Concerns
+
 1. **MEDIUM**: Event codes stored in plain text
 2. **MEDIUM**: No security headers implementation
 3. **LOW**: No CSRF protection
@@ -578,6 +1280,7 @@ The system follows a modular blueprint architecture with the following core comp
 ## Performance Issues - ✅ **SOME IMPROVEMENTS**
 
 ### ✅ Database Optimization Improvements
+
 1. **✅ IMPROVED**: Better query optimization with proper projections
 2. **✅ RESOLVED**: Fixed MongoDB update conflicts
 3. **✅ IMPROVED**: Caching implemented for rotation matrices (TR-007)
@@ -585,6 +1288,7 @@ The system follows a modular blueprint architecture with the following core comp
 5. **⚠️ REMAINS**: No general caching layer
 
 ### ⚠️ Remaining Scalability Concerns
+
 1. **⚠️ REMAINS**: Synchronous evaluation (blocking fitness function evaluation)
 2. **⚠️ REMAINS**: Memory usage for large problem sets
 3. **⚠️ REMAINS**: No database connection pooling
@@ -593,6 +1297,7 @@ The system follows a modular blueprint architecture with the following core comp
 ## Overall System Health Assessment
 
 ### ✅ **Major Improvements Achieved**
+
 - **Security**: Critical vulnerabilities addressed
 - **Code Quality**: Duplicate code removed, consistency improved
 - **Error Handling**: Standardized across most endpoints
@@ -600,6 +1305,7 @@ The system follows a modular blueprint architecture with the following core comp
 - **Performance**: Key optimizations implemented
 
 ### ⚠️ **Areas Still Needing Attention**
+
 - **Testing**: No automated testing framework
 - **Documentation**: Missing API documentation
 - **Monitoring**: No performance monitoring
@@ -607,11 +1313,13 @@ The system follows a modular blueprint architecture with the following core comp
 - **Scalability**: Basic architecture only
 
 ### 🎯 **Production Readiness: 70%**
+
 The system is now significantly more production-ready with major security and functionality issues resolved. Key remaining areas are testing, monitoring, and scalability optimizations.
 
 ## Updated Recommendations for Improvement
 
 ### ✅ Completed Actions (Previously High Priority)
+
 1. **✅ RESOLVED**: SECRET_KEY validation and warnings implemented
 2. **✅ RESOLVED**: Input validation added for authentication and submissions
 3. **✅ RESOLVED**: Debug mode now environment-controlled
@@ -619,6 +1327,7 @@ The system is now significantly more production-ready with major security and fu
 5. **✅ RESOLVED**: Error handling standardized
 
 ### 🔥 **New Immediate Actions (High Priority)**
+
 1. **Add Database Indexes**: Critical for performance optimization
 2. **Fix seed_problems.py Security**: Remove hardcoded credentials
 3. **Implement API Documentation**: OpenAPI/Swagger specification
@@ -626,6 +1335,7 @@ The system is now significantly more production-ready with major security and fu
 5. **Implement Security Headers**: CSRF, XSS protection
 
 ### 📈 **Short-term Improvements (Medium Priority)**
+
 1. **Caching Layer**: Redis for expensive operations
 2. **Monitoring System**: Application performance monitoring
 3. **Contest Management**: Admin endpoints for contest creation
@@ -633,6 +1343,7 @@ The system is now significantly more production-ready with major security and fu
 5. **Rate Limiting**: Global rate limiting implementation
 
 ### 🚀 **Long-term Enhancements (Low Priority)**
+
 1. **Microservices Architecture**: Split into separate services
 2. **Message Queue**: Async submission evaluation
 3. **Real-time Features**: WebSocket integration
@@ -642,6 +1353,7 @@ The system is now significantly more production-ready with major security and fu
 ## File Interconnections and Data Flow
 
 ### 🔄 **Authentication Flow**
+
 ```
 auth.py → models.py → MongoDB
 ├── Token creation/verification
@@ -650,6 +1362,7 @@ auth.py → models.py → MongoDB
 ```
 
 ### 🧮 **Problem Submission Flow**
+
 ```
 problems.py → ranking_system.py → leaderboard.py → statistics.py
 ├── Input validation and rate limiting
@@ -660,6 +1373,7 @@ problems.py → ranking_system.py → leaderboard.py → statistics.py
 ```
 
 ### 🏆 **Contest Flow**
+
 ```
 contests.py → problems.py → ranking_system.py
 ├── Contest participation validation
@@ -669,6 +1383,7 @@ contests.py → problems.py → ranking_system.py
 ```
 
 ### 📊 **Data Dependencies**
+
 ```
 students collection ←→ submissions collection ←→ problems collection
 ├── User rankings derived from submissions
@@ -680,18 +1395,21 @@ students collection ←→ submissions collection ←→ problems collection
 ## Error Analysis and Debugging Guide
 
 ### 🐛 **Common Error Patterns**
+
 1. **Database Connection**: Check MongoDB URI and network connectivity
 2. **Authentication**: Verify SECRET_KEY and token format
 3. **Submission Validation**: Check input bounds and rate limits
 4. **Ranking Calculation**: Ensure data consistency across collections
 
 ### 🔧 **Debugging Tools**
+
 1. **Logging**: Structured logging implemented in app.py
 2. **Health Check**: `/health` endpoint for system status
 3. **Error Responses**: Consistent error format across endpoints
 4. **Database Queries**: Use MongoDB Compass for query debugging
 
 ### 📝 **Troubleshooting Checklist**
+
 - [ ] Environment variables properly set
 - [ ] Database connection established
 - [ ] SECRET_KEY configured for production
@@ -701,6 +1419,7 @@ students collection ←→ submissions collection ←→ problems collection
 ## Setup Instructions
 
 ### 1. Prerequisites
+
 - Python 3.8+
 - MongoDB Atlas account
 - Redis (for caching, optional)
@@ -715,6 +1434,7 @@ pip install -r requirements.txt
 ### 3. Environment Configuration ⚠️ **IMPORTANT**
 
 Create `.env` file:
+
 ```env
 # Database Configuration
 MONGO_URI=mongodb+srv://your-credentials
@@ -728,6 +1448,7 @@ JWT_SECRET_KEY=your-jwt-secret
 ```
 
 **🔒 Security Notes:**
+
 - Generate a strong SECRET_KEY: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
 - Never commit `.env` file to version control
 - Use different credentials for production
@@ -743,6 +1464,7 @@ python seed_all_data.py
 ```
 
 **✅ Expected Output:**
+
 ```
 ✓ Connected to MongoDB Atlas successfully!
 ✓ Successfully inserted 10 original problems!
@@ -759,6 +1481,7 @@ python app.py
 ```
 
 **✅ Expected Output:**
+
 ```
 2024-03-31 18:30:00  INFO     __main__  Connected to MongoDB Atlas successfully.
 2024-03-31 18:30:00  INFO     __main__  All blueprints registered successfully.
@@ -768,11 +1491,13 @@ python app.py
 ### 6. Health Check
 
 Verify the system is running:
+
 ```bash
 curl http://localhost:3999/health
 ```
 
 **✅ Expected Response:**
+
 ```json
 {
   "status": "ok",
@@ -783,11 +1508,13 @@ curl http://localhost:3999/health
 ## API Endpoints Summary
 
 ### Authentication (`/api/auth`)
+
 - `POST /signup` - User registration
 - `POST /login` - User login
 - `GET /verify` - Token verification
 
 ### Problems (`/api/problems`)
+
 - `GET /` - List problems with pagination
 - `GET /<problem_id>` - Get problem details
 - `POST /<problem_id>/submit` - Submit solution
@@ -795,6 +1522,7 @@ curl http://localhost:3999/health
 - `GET /<problem_id>/leaderboard` - Problem-specific leaderboard
 
 ### Contests (`/api/contests`)
+
 - `GET /` - List contests
 - `GET /<contest_id>` - Contest details
 - `POST /<contest_id>/participate` - Join contest
@@ -802,21 +1530,25 @@ curl http://localhost:3999/health
 - `GET /my-contests` - User's contests
 
 ### Leaderboard (`/api/leaderboard`)
+
 - `GET /users` - Global user rankings
 - `GET /countries` - Country rankings
 - `GET /institutions` - Institution rankings
 - `GET /problem-setters` - Contributor rankings
 
 ### Statistics (`/api/statistics`)
+
 - `GET /` - Platform statistics
 - `GET /user/<user_id>` - User statistics
 
 ### Health Check
+
 - `GET /health` - System health status
 
 ## Database Schema
 
 ### Collections Overview
+
 1. **students** - User accounts and rankings
 2. **admins** - Administrator accounts
 3. **problems** - Optimization problems
@@ -831,6 +1563,7 @@ The TopRanker backend has undergone substantial improvements and is now a **much
 ### 🎉 **Major Achievements**
 
 **✅ Security Enhancements:**
+
 - SECRET_KEY validation and environment-based configuration
 - Input validation and sanitization across all endpoints
 - Password strength requirements and email validation
@@ -838,6 +1571,7 @@ The TopRanker backend has undergone substantial improvements and is now a **much
 - Timezone-aware datetime handling (Python 3.12+ compatible)
 
 **✅ Code Quality Improvements:**
+
 - Removed duplicate authentication code
 - Standardized error handling across endpoints
 - Fixed critical bugs (datetime imports, MongoDB conflicts)
@@ -845,12 +1579,14 @@ The TopRanker backend has undergone substantial improvements and is now a **much
 - Improved data model consistency
 
 **✅ Performance Optimizations:**
+
 - Rotation matrix caching for TR-007 fitness function
 - Fixed MongoDB update conflicts
 - Better query optimization and projections
 - Improved rate limiting implementation
 
 **✅ Data Integrity:**
+
 - Fixed schema inconsistencies
 - Proper field initialization in data models
 - Better data validation and error handling
@@ -861,6 +1597,7 @@ The TopRanker backend has undergone substantial improvements and is now a **much
 **Production Readiness: 70%** ⬆️ (from ~30% previously)
 
 The system now provides:
+
 - **Secure authentication** with proper validation
 - **Robust problem evaluation** with comprehensive input validation
 - **Reliable ranking calculations** with consistent data structures
