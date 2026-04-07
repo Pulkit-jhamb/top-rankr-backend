@@ -375,6 +375,194 @@ def update_problem(current_user, problem_id):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CONTRIBUTIONS (problem proposals from users)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@admin_bp.route("/contributions", methods=["GET"])
+@token_required
+def get_contributions(current_user):
+    """List all problem contributions filtered by status."""
+    from app import db
+    if db is None:
+        return jsonify({"message": "Database connection failed"}), 500
+    err = _admin_required(current_user)
+    if err:
+        return err
+
+    try:
+        status = request.args.get("status", "")
+        page   = int(request.args.get("page", 1))
+        limit  = int(request.args.get("limit", 50))
+        skip   = (page - 1) * limit
+
+        filters = {}
+        if status:
+            filters["status"] = status
+
+        contribs = list(db.contributions.find(filters)
+                        .sort("submittedAt", -1).skip(skip).limit(limit))
+        total = db.contributions.count_documents(filters)
+
+        for c in contribs:
+            c["_id"] = str(c["_id"])
+            if hasattr(c.get("submittedAt"), "isoformat"):
+                c["submittedAt"] = c["submittedAt"].isoformat()
+
+        return jsonify({
+            "success": True,
+            "data": contribs,
+            "pagination": {
+                "page": page, "limit": limit,
+                "total": total,
+                "pages": math.ceil(total / limit) if total else 0,
+            },
+        }), 200
+    except Exception as exc:
+        return jsonify({"message": str(exc)}), 500
+
+
+@admin_bp.route("/contributions/<contrib_id>/accept", methods=["POST"])
+@token_required
+def accept_contribution(current_user, contrib_id):
+    """Accept a contribution and create it as a live problem."""
+    from app import db
+    if db is None:
+        return jsonify({"message": "Database connection failed"}), 500
+    err = _admin_required(current_user)
+    if err:
+        return err
+
+    try:
+        contrib = db.contributions.find_one({"_id": ObjectId(contrib_id)})
+        if not contrib:
+            return jsonify({"message": "Contribution not found"}), 404
+
+        data = request.get_json() or {}
+
+        problem_id = data.get("problemId", "").strip()
+        if not problem_id:
+            return jsonify({"message": "'problemId' is required to accept"}), 400
+
+        if db.problems.find_one({"problemId": problem_id}):
+            return jsonify({"message": f"Problem '{problem_id}' already exists"}), 409
+
+        dims_raw = data.get("dimensions", [10, 20, 30])
+        if isinstance(dims_raw, str):
+            dims_raw = [int(x.strip()) for x in dims_raw.split(",") if x.strip().isdigit()]
+
+        problem = {
+            "problemId":        problem_id,
+            "name":             contrib.get("name", ""),
+            "level":            data.get("level", contrib.get("level", "Medium")),
+            "type":             data.get("type", "Minimization"),
+            "category":         data.get("category", ""),
+            "tags":             data.get("tags", []),
+            "description":      contrib.get("description", ""),
+            "status":           "active",
+            "totalSubmissions": 0,
+            "owner":            contrib.get("submitterId", ""),
+            "ownerName":        contrib.get("submitterName", ""),
+            "created_at":       datetime.now(timezone.utc),
+            "dimensions":       [{"dimension": d, "submissions": 0} for d in dims_raw],
+            "fitnessFunction": {
+                "formula":       data.get("formula", contrib.get("fitnessFormula", "")),
+                "constraint":    data.get("constraint", contrib.get("constraint", "")),
+                "bounds": {
+                    "min": float(data.get("boundsMin", -10)),
+                    "max": float(data.get("boundsMax",  10)),
+                },
+                "globalMinimum": float(data.get("globalMinimum", 0)),
+            },
+        }
+
+        db.problems.insert_one(problem)
+        db.contributions.update_one(
+            {"_id": ObjectId(contrib_id)},
+            {"$set": {"status": "accepted", "problemId": problem_id,
+                      "reviewedAt": datetime.now(timezone.utc),
+                      "reviewedBy": current_user.get("user_id", "")}},
+        )
+
+        return jsonify({
+            "success": True,
+            "message": f"Contribution accepted and problem '{problem_id}' created.",
+        }), 200
+    except Exception as exc:
+        return jsonify({"message": str(exc)}), 500
+
+
+@admin_bp.route("/contributions/<contrib_id>/reject", methods=["POST"])
+@token_required
+def reject_contribution(current_user, contrib_id):
+    """Reject a contribution."""
+    from app import db
+    if db is None:
+        return jsonify({"message": "Database connection failed"}), 500
+    err = _admin_required(current_user)
+    if err:
+        return err
+
+    try:
+        data   = request.get_json() or {}
+        reason = data.get("reason", "").strip()
+
+        res = db.contributions.update_one(
+            {"_id": ObjectId(contrib_id)},
+            {"$set": {
+                "status":     "rejected",
+                "reason":     reason,
+                "reviewedAt": datetime.now(timezone.utc),
+                "reviewedBy": current_user.get("user_id", ""),
+            }},
+        )
+        if res.matched_count == 0:
+            return jsonify({"message": "Contribution not found"}), 404
+
+        return jsonify({"success": True, "message": "Contribution rejected."}), 200
+    except Exception as exc:
+        return jsonify({"message": str(exc)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ADD PROBLEM TO CONTEST
+# ─────────────────────────────────────────────────────────────────────────────
+
+@admin_bp.route("/contests/<contest_id>/add-problem", methods=["POST"])
+@token_required
+def add_problem_to_contest(current_user, contest_id):
+    """Add a problem ID to an existing contest's problems list."""
+    from app import db
+    if db is None:
+        return jsonify({"message": "Database connection failed"}), 500
+    err = _admin_required(current_user)
+    if err:
+        return err
+
+    try:
+        data       = request.get_json() or {}
+        problem_id = data.get("problemId", "").strip()
+        if not problem_id:
+            return jsonify({"message": "'problemId' is required"}), 400
+
+        if not db.problems.find_one({"problemId": problem_id}):
+            return jsonify({"message": f"Problem '{problem_id}' does not exist"}), 404
+
+        res = db.contests.update_one(
+            {"eventId": contest_id},
+            {"$addToSet": {"problems": problem_id}},
+        )
+        if res.matched_count == 0:
+            return jsonify({"message": "Contest not found"}), 404
+
+        return jsonify({
+            "success": True,
+            "message": f"Problem '{problem_id}' added to contest '{contest_id}'.",
+        }), 200
+    except Exception as exc:
+        return jsonify({"message": str(exc)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # DASHBOARD STATS
 # ─────────────────────────────────────────────────────────────────────────────
 

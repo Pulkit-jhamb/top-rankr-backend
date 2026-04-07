@@ -675,6 +675,47 @@ def get_my_submissions(current_user, problem_id):
     }), 200
 
 
+@problems_bp.route('/contribute', methods=['POST'])
+@token_required
+def contribute_problem(current_user):
+    """Submit a problem contribution for admin review."""
+    from app import db
+    if db is None:
+        return jsonify({'message': 'Database connection failed'}), 500
+
+    data = request.get_json() or {}
+    name           = data.get('name', '').strip()
+    description    = data.get('description', '').strip()
+    fitness_formula = data.get('fitnessFormula', '').strip()
+
+    if not name:
+        return jsonify({'message': 'Problem name is required'}), 400
+    if not description:
+        return jsonify({'message': 'Problem description is required'}), 400
+    if not fitness_formula:
+        return jsonify({'message': 'Fitness function formula is required'}), 400
+
+    contribution = {
+        'name':           name,
+        'level':          data.get('level', 'Medium'),
+        'description':    description,
+        'fitnessFormula': fitness_formula,
+        'constraint':     data.get('constraint', ''),
+        'submitterId':    current_user['user_id'],
+        'submitterName':  current_user.get('name', ''),
+        'submitterEmail': current_user.get('email', ''),
+        'status':         'pending',
+        'submittedAt':    datetime.now(timezone.utc),
+    }
+
+    result = db.contributions.insert_one(contribution)
+    return jsonify({
+        'success': True,
+        'message': 'Contribution submitted! Admin will review it shortly.',
+        'id':      str(result.inserted_id),
+    }), 201
+
+
 @problems_bp.route('/<problem_id>/leaderboard', methods=['GET'])
 def get_problem_leaderboard(problem_id):
     """
