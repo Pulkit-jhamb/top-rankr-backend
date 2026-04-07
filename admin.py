@@ -284,8 +284,96 @@ def update_contest(current_user, contest_id):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PROBLEMS  (create / update)
+# CONTESTS  (list all for admin)
 # ─────────────────────────────────────────────────────────────────────────────
+
+@admin_bp.route("/contests/all", methods=["GET"])
+@token_required
+def get_all_contests_admin(current_user):
+    """Return all contests (all statuses) for the admin panel."""
+    from app import db
+    if db is None:
+        return jsonify({"message": "Database connection failed"}), 500
+    err = _admin_required(current_user)
+    if err:
+        return err
+
+    try:
+        page  = int(request.args.get("page", 1))
+        limit = int(request.args.get("limit", 100))
+        skip  = (page - 1) * limit
+
+        contests = list(db.contests.find({}, {"eventCode": 0}).skip(skip).limit(limit).sort("_id", -1))
+        total = db.contests.count_documents({})
+
+        for c in contests:
+            c["_id"] = str(c["_id"])
+            c["participantCount"] = len(c.pop("participants", []))
+            for df in ("startDate", "endDate", "created_at"):
+                if hasattr(c.get(df), "isoformat"):
+                    c[df] = c[df].isoformat()
+
+        return jsonify({
+            "success": True,
+            "data": contests,
+            "pagination": {
+                "page": page, "limit": limit,
+                "total": total,
+                "pages": math.ceil(total / limit) if total else 0,
+            },
+        }), 200
+    except Exception as exc:
+        return jsonify({"message": str(exc)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROBLEMS  (create / update / list all)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@admin_bp.route("/problems", methods=["GET"])
+@token_required
+def get_all_problems_admin(current_user):
+    """Return all problems (all statuses) for the admin panel."""
+    from app import db
+    if db is None:
+        return jsonify({"message": "Database connection failed"}), 500
+    err = _admin_required(current_user)
+    if err:
+        return err
+
+    try:
+        page   = int(request.args.get("page", 1))
+        limit  = int(request.args.get("limit", 100))
+        skip   = (page - 1) * limit
+        search = request.args.get("search", "").strip()
+
+        filters = {}
+        if search:
+            filters["$or"] = [
+                {"problemId": {"$regex": search, "$options": "i"}},
+                {"name":      {"$regex": search, "$options": "i"}},
+            ]
+
+        problems = list(db.problems.find(filters).skip(skip).limit(limit).sort("problemId", 1))
+        total = db.problems.count_documents(filters)
+
+        for p in problems:
+            p["_id"] = str(p["_id"])
+            if hasattr(p.get("created_at"), "isoformat"):
+                p["created_at"] = p["created_at"].isoformat()
+
+        return jsonify({
+            "success": True,
+            "data": problems,
+            "pagination": {
+                "page": page, "limit": limit,
+                "total": total,
+                "pages": math.ceil(total / limit) if total else 0,
+            },
+        }), 200
+    except Exception as exc:
+        return jsonify({"message": str(exc)}), 500
+
 
 @admin_bp.route("/problems", methods=["POST"])
 @token_required
