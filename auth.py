@@ -121,6 +121,14 @@ def signup():
     if pwd_error:
         return jsonify({"message": pwd_error}), 400
 
+    if role == "student":
+        institution = (data.get("institution") or "").strip()
+        country     = (data.get("country") or "").strip()
+        if not institution:
+            return jsonify({"message": "Institution is required"}), 400
+        if not country:
+            return jsonify({"message": "Country is required"}), 400
+
     existing = (Student if role == "student" else Admin).find_by_email(db, email)
     if existing:
         return jsonify({"message": "User with this email already exists"}), 409
@@ -132,8 +140,8 @@ def signup():
     }
 
     if role == "student":
-        user_data["institution"] = data.get("institution", "")
-        user_data["country"]     = data.get("country", "")
+        user_data["institution"] = institution
+        user_data["country"]     = country
         user = Student.create(db, user_data)
     else:
         user = Admin.create(db, user_data)

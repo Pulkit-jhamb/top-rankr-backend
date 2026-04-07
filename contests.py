@@ -46,7 +46,11 @@ def get_contests():
         if contest_type != "all":
             filters["type"] = contest_type
         if status != "all":
-            filters["status"] = status
+            statuses = [s.strip() for s in status.split(",") if s.strip()]
+            if len(statuses) == 1:
+                filters["status"] = statuses[0]
+            elif len(statuses) > 1:
+                filters["status"] = {"$in": statuses}
 
         # Do NOT exclude 'participants' from the projection here — we need it
         # to compute participantCount.  eventCode is excluded for security.
